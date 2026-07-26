@@ -28,6 +28,101 @@ function money(n: number | null | undefined) {
   });
 }
 
+/** Format a percentage; show + for gains. */
+function pct(n: number | null | undefined, digits = 1): string {
+  if (n == null || !Number.isFinite(n)) return "—";
+  const sign = n > 0 ? "+" : "";
+  return `${sign}${n.toFixed(digits)}%`;
+}
+
+/** "$12,345  ·  +23.4%" — omit % when null. */
+function moneyPct(
+  aud: number | null | undefined,
+  percent: number | null | undefined,
+  digits = 1,
+): string {
+  const m = money(aud);
+  if (percent == null || !Number.isFinite(percent)) return m;
+  return `${m}  ·  ${pct(percent, digits)}`;
+}
+
+/**
+ * Derive % metrics from an allocation report for the UI.
+ * CAGR is a simple compound on total capital in → ending economic wealth after tax
+ * (not a true money-weighted IRR when contributions are lumpy).
+ */
+function allocPctMetrics(
+  a: AllocationReport,
+  horizonYears: number,
+): {
+  capitalIn: number;
+  netGain: number;
+  endingAfterTax: number;
+  wealthBeforeExitCgt: number;
+  totalTax: number;
+  /** net gain / capital in */
+  netReturnPct: number | null;
+  /** simple CAGR of (capitalIn + netGain) / capitalIn */
+  approxCagrPct: number | null;
+  /** portfolio+cash divs before exit CGT / capital in − 1 */
+  wealthGrowthPct: number | null;
+  /** total tax / capital in */
+  taxOnCapitalPct: number | null;
+  /** total tax / (net gain + total tax) when pretax gain > 0 */
+  taxTakeOfGainPct: number | null;
+  /** portfolio value / capital in */
+  portfolioMultiple: number | null;
+} {
+  const capitalIn = a.totalCapitalIn ?? a.totalContributions ?? 0;
+  const netGain =
+    a.netGainAfterTax ??
+    a.netIfLiquidated +
+      a.totalDividendsCash -
+      capitalIn -
+      a.totalIncomeTax;
+  const endingAfterTax = capitalIn + netGain;
+  const wealthBeforeExitCgt =
+    a.totalWealthBeforeExitCgt ?? a.finalValue + a.totalDividendsCash;
+  const totalTax = a.totalIncomeTax + a.totalCgtTax;
+
+  const netReturnPct =
+    capitalIn > 0 ? (netGain / capitalIn) * 100 : null;
+  const wealthGrowthPct =
+    capitalIn > 0 ? (wealthBeforeExitCgt / capitalIn - 1) * 100 : null;
+  const taxOnCapitalPct =
+    capitalIn > 0 ? (totalTax / capitalIn) * 100 : null;
+  const pretaxEconomic = netGain + totalTax;
+  const taxTakeOfGainPct =
+    pretaxEconomic > 0 ? (totalTax / pretaxEconomic) * 100 : null;
+  const portfolioMultiple =
+    capitalIn > 0 ? a.finalValue / capitalIn : null;
+
+  let approxCagrPct: number | null = null;
+  if (
+    capitalIn > 0 &&
+    endingAfterTax > 0 &&
+    horizonYears > 0 &&
+    Number.isFinite(horizonYears)
+  ) {
+    approxCagrPct =
+      (Math.pow(endingAfterTax / capitalIn, 1 / horizonYears) - 1) * 100;
+  }
+
+  return {
+    capitalIn,
+    netGain,
+    endingAfterTax,
+    wealthBeforeExitCgt,
+    totalTax,
+    netReturnPct,
+    approxCagrPct,
+    wealthGrowthPct,
+    taxOnCapitalPct,
+    taxTakeOfGainPct,
+    portfolioMultiple,
+  };
+}
+
 /** UI stores rates as percent numbers (e.g. 5.5) for easier editing */
 type UiAsset = {
   ticker: string;
@@ -223,6 +318,8 @@ type PlannerDraft = {
   monthlyContribution: number;
   initialValue: number;
   cgtRegime: CgtRegime;
+  /** Assumed CPI % p.a. for cost-base indexation (post-2027) */
+  inflationPct: number;
   compareOldCgt: boolean;
   showContributionPath: boolean;
   keyframes: UiKeyframe[];
@@ -282,13 +379,17 @@ export function PlannerPanel() {
   const [initialValue, setInitialValue] = useState(
     () => draft?.initialValue ?? 50000,
   );
-  /** Primary question: tax if you sell under post–Jul 2027 rules */
+  /** Planner is post–Jul 2027: indexed cost base, no 50% discount, min 30% rate. */
   const [cgtRegime, setCgtRegime] = useState<CgtRegime>(
     () => draft?.cgtRegime ?? "indexation_min30",
   );
-  /** Also run under old 50% discount to show reform impact */
+  /** Assumed CPI % p.a. for cost-base indexation */
+  const [inflationPct, setInflationPct] = useState(
+    () => draft?.inflationPct ?? 2.5,
+  );
+  /** Optional “what if old 50% discount” — off by default */
   const [compareOldCgt, setCompareOldCgt] = useState(
-    () => draft?.compareOldCgt ?? true,
+    () => draft?.compareOldCgt ?? false,
   );
 
   /** Expandable contribution path (keyframes + lump sums) */
@@ -371,6 +472,7 @@ export function PlannerPanel() {
         monthlyContribution,
         initialValue,
         cgtRegime,
+        inflationPct,
         compareOldCgt,
         showContributionPath,
         keyframes,
@@ -388,6 +490,7 @@ export function PlannerPanel() {
     monthlyContribution,
     initialValue,
     cgtRegime,
+    inflationPct,
     compareOldCgt,
     showContributionPath,
     keyframes,
@@ -412,7 +515,8 @@ export function PlannerPanel() {
     setMonthlyContribution(1000);
     setInitialValue(50000);
     setCgtRegime("indexation_min30");
-    setCompareOldCgt(true);
+    setInflationPct(2.5);
+    setCompareOldCgt(false);
     setShowContributionPath(false);
     setKeyframes([]);
     setLumpSums([]);
@@ -578,12 +682,12 @@ export function PlannerPanel() {
 
       const rounded = Math.round(market);
       setInitialValue(rounded);
-      // Run path sets initialCostBaseAud = initialValue (same starting cost base)
+      // Run always sets initialCostBaseAud = initialValue (new-money model: buy at market)
       setSeedNote(
         `Starting value set to ${money(rounded)} from holdings market value` +
           (cost != null && Number.isFinite(cost)
-            ? ` (cost base ~${money(Math.round(cost))} — planner uses start = cost base for new-buy model).`
-            : "."),
+            ? ` (holdings cost base ~${money(Math.round(cost))} is not used — planner treats this as fresh capital at cost = market for CGT).`
+            : " (treated as fresh capital; cost base starts equal to market value)."),
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -640,6 +744,7 @@ export function PlannerPanel() {
         // Fresh capital under new rules — cost base starts at contributions/initial
         initialValueAud: initialValue,
         initialCostBaseAud: initialValue,
+        inflationRateAnnual: Math.max(0, inflationPct) / 100,
         monthlyContributionAud: monthlyContribution,
         ...(contributionKeyframes.length
           ? { contributionKeyframes }
@@ -663,6 +768,8 @@ export function PlannerPanel() {
           ...base,
           name: "Same plans under old 50% CGT discount",
           cgtRegime: "discount_50",
+          // Legacy path: no CPI indexation of cost
+          inflationRateAnnual: 0,
         });
         setReportOldCgt(old);
       }
@@ -704,32 +811,28 @@ export function PlannerPanel() {
         </div>
       </div>
       <p className="mb-3 text-sm text-gray-400">
-        Use this for <strong className="text-gray-200">new money after 1 Jul
-        2027</strong> (or any horizon where sales sit under the new CGT rules):
-        should you favour a <strong className="text-gray-200">growth</strong>{" "}
-        mix or a <strong className="text-gray-200">dividend</strong> mix once the
-        50% CGT discount is gone? Compare tax paths — income tax along the way
-        vs CGT when you sell — for the same contributions. Not for modelling
-        stocks you already bought years ago (use Holdings for that). Inputs
-        auto-save in this browser.
+        For <strong className="text-gray-200">new money only under post–Jul
+        2027 CGT</strong>: cost base is CPI-indexed; no 50% discount; tax on the
+        indexed gain at{" "}
+        <strong className="text-gray-200">
+          max(your MTR + Medicare, 30%)
+        </strong>{" "}
+        — so a 0% tax rate still faces a 30% CGT floor. Compare growth vs
+        dividend for the same contributions. Inputs auto-save in this browser.
       </p>
       <ul className="mb-4 list-inside list-disc text-xs text-gray-500">
         <li>
-          <strong className="text-gray-400">Assumes buys under the new regime</strong>{" "}
-          — default exit CGT = post–Jul 2027 model; optional compare to old 50%
-          discount.
+          <strong className="text-gray-400">Indexed cost base</strong> — assumed
+          inflation lifts cost each month (reduces taxable gain vs nominal).
         </li>
         <li>
-          <strong className="text-gray-400">Growth</strong> — lower yield, more
-          capital gain → more tax at sale under the new CGT floor.
+          <strong className="text-gray-400">No 50% CGT discount</strong> — rate =
+          max(MTR+Medicare, 30%) on the indexed gain.
         </li>
         <li>
-          <strong className="text-gray-400">Dividend</strong> — higher yield →
-          more income tax yearly; usually less exit CGT if gains are smaller.
-        </li>
-        <li>
-          CGT = sell value − cost base, then a <em>simplified</em> long-term
-          rate — not full CPI indexation of cost base. Estimates only.
+          <strong className="text-gray-400">Growth</strong> — more capital gain
+          at sale; <strong className="text-gray-400">Dividend</strong> — more
+          yearly income tax, often less exit CGT.
         </li>
       </ul>
 
@@ -801,20 +904,35 @@ export function PlannerPanel() {
             <p className="mt-1 text-xs text-gray-400">{seedNote}</p>
           )}
         </div>
-        <Field label="CGT on exit (primary)">
+        <Field label="CGT regime">
           <select
             className="field"
             value={cgtRegime}
             onChange={(e) => setCgtRegime(e.target.value as CgtRegime)}
           >
             <option value="indexation_min30">
-              Post–Jul 2027 model (min 30% of gain)
+              Post–Jul 2027 (indexed cost · max(MTR, 30%) · no 50% discount)
             </option>
-            <option value="discount_50">Old 50% CGT discount</option>
-            <option value="auto_by_date">
-              Auto by sale date (before/after 1 Jul 2027)
+            <option value="discount_50">
+              Legacy only: old 50% CGT discount (nominal cost)
             </option>
           </select>
+        </Field>
+        <Field label="Assumed inflation / CPI (% p.a.)">
+          <input
+            className="field"
+            type="number"
+            min={0}
+            max={15}
+            step={0.1}
+            value={inflationPct}
+            onChange={(e) => setInflationPct(Number(e.target.value) || 0)}
+            disabled={cgtRegime === "discount_50"}
+          />
+          <span className="mt-1 block text-[11px] text-gray-500">
+            Indexes cost base under post‑2027 (default 2.5%). Higher inflation →
+            higher cost base → lower CGT gain.
+          </span>
         </Field>
         <label className="flex items-end gap-2 pb-2 text-sm text-gray-300">
           <input
@@ -822,10 +940,10 @@ export function PlannerPanel() {
             checked={compareOldCgt}
             onChange={(e) => setCompareOldCgt(e.target.checked)}
             className="mb-2"
+            disabled={cgtRegime === "discount_50"}
           />
           <span>
-            Also compare under <strong>old 50% discount</strong> (shows reform
-            impact)
+            Optional: also show <strong>old 50% discount</strong> side-by-side
           </span>
         </label>
       </div>
@@ -1429,7 +1547,9 @@ export function PlannerPanel() {
               exit: {report.exit.type}. Compare{" "}
               <strong className="text-gray-400">income tax along the way</strong>{" "}
               vs <strong className="text-gray-400">CGT when you sell</strong>.
+              Percentages are vs capital you put in (start + contributions).
             </p>
+            <ResultsGlance report={report} />
             <ResultsTable report={report} emphasizeTax />
             <YearByYearPanel report={report} />
           </div>
@@ -1475,6 +1595,9 @@ export function PlannerPanel() {
                         const old = reportOldCgt.allocations[i];
                         const delta =
                           (a.exitCgtTax ?? 0) - (old?.exitCgtTax ?? 0);
+                        const base = old?.exitCgtTax ?? 0;
+                        const deltaPct =
+                          base > 0 ? (delta / base) * 100 : null;
                         return (
                           <td
                             key={a.allocationId}
@@ -1482,7 +1605,7 @@ export function PlannerPanel() {
                               delta > 0 ? "text-red-300" : "text-gray-200"
                             }`}
                           >
-                            {money(delta)}
+                            {moneyPct(delta, deltaPct)}
                           </td>
                         );
                       })}
@@ -1502,6 +1625,10 @@ export function PlannerPanel() {
                             ? old.netIfLiquidated - old.totalContributions
                             : 0);
                         const delta = nNew - nOld;
+                        const capitalIn =
+                          a.totalCapitalIn ?? a.totalContributions ?? 0;
+                        const deltaPct =
+                          capitalIn > 0 ? (delta / capitalIn) * 100 : null;
                         return (
                           <td
                             key={a.allocationId}
@@ -1509,7 +1636,7 @@ export function PlannerPanel() {
                               delta < 0 ? "text-red-300" : "text-emerald-300"
                             }`}
                           >
-                            {money(delta)}
+                            {moneyPct(delta, deltaPct)}
                           </td>
                         );
                       })}
@@ -1521,14 +1648,14 @@ export function PlannerPanel() {
           )}
 
           <p className="text-xs text-gray-500">
-            <strong className="text-gray-400">Net gain after tax</strong> = cash
-            after exit CGT − contributions (income tax already reduced the
-            portfolio).{" "}
-            <strong className="text-gray-400">
-              Not true CPI-indexed cost base
-            </strong>
-            : capital gain = sell value − cost base; post‑2027 mode applies a
-            simplified floor rate on that gain.
+            <strong className="text-gray-400">Net return %</strong> = net gain
+            after tax ÷ capital you put in.{" "}
+            <strong className="text-gray-400">Approx. CAGR</strong> compounds
+            that ending wealth over the horizon (not a money-weighted IRR when
+            contributions vary).{" "}
+            <strong className="text-gray-400">Tax take of gain</strong> = total
+            tax ÷ (net gain + tax). Post‑2027 CGT: indexed cost base; rate =
+            max(MTR+Medicare, 30%) on indexed gain; no 50% discount.
           </p>
         </div>
       )}
@@ -1553,8 +1680,9 @@ export function PlannerPanel() {
 }
 
 function cgtRegimeLabel(r: string) {
-  if (r === "indexation_min30") return "post–Jul 2027 (min 30% of gain)";
-  if (r === "discount_50") return "old 50% CGT discount";
+  if (r === "indexation_min30")
+    return "post–Jul 2027 (indexed cost · max(MTR, 30%))";
+  if (r === "discount_50") return "legacy old 50% CGT discount";
   if (r === "auto_by_date") return "auto by sale date";
   return r;
 }
@@ -1628,8 +1756,63 @@ function blendedTargetYield(target: UiAllocation, redeployAud: number) {
 }
 
 /**
+ * Net cash available after selling phase‑1 to fund the switch.
+ *
+ * - **Sell all at end** on the strategy: main sim already applied exit CGT.
+ *   Reuse that hit once — do not tax again. Redeploy = netIfLiquidated.
+ * - **Hold / drawdown**: main sim did not sell. Estimate CGT on the paper
+ *   capital gain so switch still models “sell then buy phase‑2”.
+ */
+function switchSaleProceeds(
+  source: AllocationReport,
+  report: ScenarioReport,
+  taxProfile?: TaxProfileDto | null,
+): {
+  capitalGain: number;
+  cgtTax: number;
+  netProceeds: number;
+  /** true = CGT from main sim (exit was liquidate); false = estimated for hold */
+  cgtAlreadyInMainSim: boolean;
+} {
+  const portfolio = source.finalValue ?? 0;
+  const capitalGain = Math.max(0, source.exitCapitalGain ?? 0);
+
+  // Main sim already sold at end — one tax hit only
+  if (source.exit?.type === "liquidate") {
+    const cgtTax = source.exitCgtTax ?? 0;
+    return {
+      capitalGain,
+      cgtTax,
+      netProceeds: Math.max(
+        0,
+        source.netIfLiquidated ?? portfolio - cgtTax,
+      ),
+      cgtAlreadyInMainSim: true,
+    };
+  }
+
+  // Hold / drawdown: no exit sale in main sim — estimate CGT for the switch sale.
+  // exitCapitalGain from engine is already on indexed cost under post-2027.
+  const mtr =
+    (taxProfile?.marginalRate ?? report.taxProfile?.marginalRate ?? 0.37) +
+    (taxProfile?.medicareLevy ?? report.taxProfile?.medicareLevy ?? 0.02);
+  const regime = report.cgtRegime ?? "indexation_min30";
+  // Post-2027: max(MTR, 30%). Legacy discount_50: half rate.
+  const estimatedRate =
+    regime === "discount_50" ? mtr * 0.5 : Math.max(mtr, 0.3);
+  const cgtTax = Math.round(capitalGain * estimatedRate * 100) / 100;
+  return {
+    capitalGain,
+    cgtTax,
+    netProceeds: Math.max(0, portfolio - cgtTax),
+    cgtAlreadyInMainSim: false,
+  };
+}
+
+/**
  * Phase-2 income after accumulating in one strategy, selling, then buying another.
  * Pure UI estimate from the last run + current ticker assumptions.
+ * Redeploys net of one sale CGT: from main sim if exit was sell, else estimated.
  */
 function SwitchIncomePanel({
   report,
@@ -1725,7 +1908,11 @@ function SwitchIncomePanel({
     return null;
   }
 
-  const portfolioAfterCgt = source.netIfLiquidated ?? 0;
+  // One sale CGT only: already in main sim if exit = sell; else estimate for hold
+  const sale = switchSaleProceeds(source, report, taxProfile);
+  const portfolioGross = source.finalValue ?? 0;
+  const cgtOnSwitch = sale.cgtTax;
+  const portfolioAfterCgt = sale.netProceeds;
   const cashDivs = source.totalDividendsCash ?? 0;
   const redeploy =
     portfolioAfterCgt + (includeCashDivs ? cashDivs : 0);
@@ -1852,9 +2039,14 @@ function SwitchIncomePanel({
         Switch at end · choose strategies
       </h3>
       <p className="mb-4 text-xs text-gray-500">
-        Pick which strategy you run for 10 years, then which strategy gets{" "}
-        <strong className="text-gray-400">100% of the sale proceeds</strong> for
-        income. Numbers update instantly — no need to re-run the main comparison.
+        After phase‑1 you{" "}
+        <strong className="text-gray-400">sell everything</strong> (CGT on the
+        old holding, indexed cost from phase‑1) then{" "}
+        <strong className="text-gray-400">buy phase‑2 as a new purchase</strong>.
+        Phase‑2 cost base = net proceeds (indexation clock restarts at zero
+        history — not the old indexed base). Year‑1 income is yield on that
+        new pile only. If phase‑1 exit was Sell, sale CGT is reused from the
+        main run; if Hold, we estimate it here.
       </p>
 
       {/* Strategy choosers — primary UI */}
@@ -1930,7 +2122,8 @@ function SwitchIncomePanel({
           <span>
             Also redeploy phase‑1 cash dividends ({money(cashDivs)})
             <span className="mt-0.5 block text-xs text-gray-500">
-              Only if you saved them. Default = portfolio after exit CGT only.
+              Only if you saved them. Default = portfolio after switch-sale CGT
+              only.
             </span>
           </span>
         </label>
@@ -1939,10 +2132,25 @@ function SwitchIncomePanel({
       <div className="mb-3 rounded-lg border border-sky-800/40 bg-sky-950/30 px-3 py-2.5 text-sm text-sky-100/90">
         <div>
           <strong className="text-sky-100">{source.label}</strong>
-          <span className="text-gray-500"> → sell → all </span>
-          <strong className="text-sky-100">{money(redeploy)}</strong>
+          <span className="text-gray-500">
+            {" "}
+            ({money(portfolioGross)}) → sell → CGT {money(cgtOnSwitch)} → net{" "}
+          </span>
+          <strong className="text-sky-100">{money(portfolioAfterCgt)}</strong>
           <span className="text-gray-500"> → </span>
           <strong className="text-emerald-200">{targetReport.label}</strong>
+        </div>
+        <div className="mt-1 text-xs text-gray-400">
+          Gain on sale {money(sale.capitalGain)}
+          {sale.capitalGain > 0
+            ? ` · CGT effective ${(
+                (cgtOnSwitch / sale.capitalGain) *
+                100
+              ).toFixed(0)}% of gain`
+            : ""}
+          {sale.cgtAlreadyInMainSim
+            ? " · CGT already in main sim (Sell all at end) — not taxed twice"
+            : " · phase‑1 was Hold/drawdown — CGT estimated here for the switch sale"}
         </div>
         <div className="mt-1 text-xs text-gray-400">
           {targetReport.label} cash yield{" "}
@@ -1967,19 +2175,39 @@ function SwitchIncomePanel({
         )}
       </div>
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
         <StatCard
-          label="Phase 1 portfolio after exit CGT"
-          value={money(portfolioAfterCgt)}
-          hint={`${source.label} · net if liquidated`}
+          label="Phase 1 portfolio (before sale)"
+          value={money(portfolioGross)}
+          hint={`${source.label} · market value`}
         />
         <StatCard
-          label={`All redeployed into ${targetReport.label}`}
+          label={
+            sale.cgtAlreadyInMainSim
+              ? "CGT on sale (from main sim)"
+              : "CGT on sale (estimated)"
+          }
+          value={money(cgtOnSwitch)}
+          hint={
+            sale.cgtAlreadyInMainSim
+              ? `on ${money(sale.capitalGain)} indexed gain · not double-counted`
+              : sale.capitalGain > 0
+                ? `on ${money(sale.capitalGain)} indexed gain · Hold had no exit CGT`
+                : "no capital gain"
+          }
+        />
+        <StatCard
+          label="Net cash after sale CGT"
+          value={money(portfolioAfterCgt)}
+          hint="what you have to reinvest"
+        />
+        <StatCard
+          label={`Phase 2 new cost base → ${targetReport.label}`}
           value={money(redeploy)}
           hint={
             includeCashDivs
-              ? "portfolio + saved cash divs · 100% of pile"
-              : "100% of pile after exit CGT"
+              ? "new buy = sale net + saved cash divs · indexation restarts"
+              : "new buy at this amount · old indexed cost dies with the sale"
           }
           emphasize
         />
@@ -1993,7 +2221,7 @@ function SwitchIncomePanel({
           value={money(grossCash)}
           hint={
             grossReinvest > 0
-              ? `+ ${money(grossReinvest)} DRP (not cash)`
+              ? `+ ${money(grossReinvest)} DRP · yield on new cost base ${money(redeploy)}`
               : `= ${money(redeploy)} × ${blend.cashYieldPct.toFixed(2)}% cash`
           }
           emphasize
@@ -2247,8 +2475,11 @@ function SwitchIncomePanel({
       )}
 
       <p className="text-xs text-gray-500">
-        Cost base resets when you buy phase 2. Yields are your assumed rates
-        (tweak tickers above and re-run if weights changed). Switch column is
+        Sale CGT uses phase‑1’s indexed cost (taxed once). After the buy,
+        phase‑2 cost base = redeployed cash only — no carried indexation from
+        phase‑1; CPI clock starts again on the new purchase. Year‑1 switch
+        income is yield on that new pile only (not a multi‑year phase‑2 CGT
+        sim). Yields are your assumed rates. Switch column is
         year‑1 after redeploy; Dividend column is{" "}
         <strong className="text-gray-400">
           actual sim cash in the final horizon year
@@ -2295,6 +2526,74 @@ function StatCard({
 /**
  * Collapsible year-by-year breakdown for each strategy allocation.
  */
+function ResultsGlance({ report }: { report: ScenarioReport }) {
+  const years = report.horizonYears;
+  return (
+    <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      {report.allocations.map((a) => {
+        const m = allocPctMetrics(a, years);
+        return (
+          <div
+            key={a.allocationId}
+            className="rounded-xl border border-gray-800 bg-gray-950/50 px-3 py-3"
+          >
+            <div className="flex items-baseline justify-between gap-2">
+              <p className="text-sm font-medium text-emerald-300">{a.label}</p>
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">
+                {a.exit?.type === "hold"
+                  ? "hold"
+                  : a.exit?.type === "drawdown"
+                    ? "drawdown"
+                    : "sell"}
+              </p>
+            </div>
+            <p
+              className={`mt-2 text-2xl font-semibold tabular-nums ${
+                (m.netReturnPct ?? 0) >= 0
+                  ? "text-emerald-300"
+                  : "text-red-300"
+              }`}
+            >
+              {pct(m.netReturnPct)}
+            </p>
+            <p className="text-xs text-gray-500">
+              net return on capital · {years}y
+            </p>
+            <dl className="mt-3 grid grid-cols-2 gap-x-2 gap-y-1.5 text-xs">
+              <dt className="text-gray-500">Approx. CAGR</dt>
+              <dd className="text-right tabular-nums text-gray-200">
+                {pct(m.approxCagrPct)}
+              </dd>
+              <dt className="text-gray-500">Wealth before exit CGT</dt>
+              <dd className="text-right tabular-nums text-gray-200">
+                {pct(m.wealthGrowthPct)}
+              </dd>
+              <dt className="text-gray-500">Tax / capital</dt>
+              <dd className="text-right tabular-nums text-amber-100/90">
+                {pct(m.taxOnCapitalPct)}
+              </dd>
+              <dt className="text-gray-500">Tax take of gain</dt>
+              <dd className="text-right tabular-nums text-amber-100/90">
+                {pct(m.taxTakeOfGainPct)}
+              </dd>
+              <dt className="text-gray-500">Portfolio multiple</dt>
+              <dd className="text-right tabular-nums text-gray-200">
+                {m.portfolioMultiple != null
+                  ? `${m.portfolioMultiple.toFixed(2)}×`
+                  : "—"}
+              </dd>
+              <dt className="text-gray-500">Net gain $</dt>
+              <dd className="text-right tabular-nums text-gray-200">
+                {money(m.netGain)}
+              </dd>
+            </dl>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function YearByYearPanel({ report }: { report: ScenarioReport }) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState(0);
@@ -2340,11 +2639,12 @@ function YearByYearPanel({ report }: { report: ScenarioReport }) {
             </p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[720px] text-left text-sm">
+              <table className="w-full min-w-[800px] text-left text-sm">
                 <thead className="text-xs uppercase tracking-wide text-gray-500">
                   <tr>
                     <th className="pb-2 pr-2 font-medium">Year</th>
                     <th className="pb-2 pr-2 font-medium">End value</th>
+                    <th className="pb-2 pr-2 font-medium">YoY value</th>
                     <th className="pb-2 pr-2 font-medium">Contributions</th>
                     <th className="pb-2 pr-2 font-medium">Cash divs</th>
                     <th className="pb-2 pr-2 font-medium">Reinvested</th>
@@ -2354,45 +2654,63 @@ function YearByYearPanel({ report }: { report: ScenarioReport }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {years.map((y) => (
-                    <tr
-                      key={y.year}
-                      className="border-t border-gray-800/80"
-                    >
-                      <td className="py-1.5 pr-2 tabular-nums text-gray-300">
-                        {y.year}
-                      </td>
-                      <td className="py-1.5 pr-2 tabular-nums text-gray-100">
-                        {money(y.endValue)}
-                      </td>
-                      <td className="py-1.5 pr-2 tabular-nums text-gray-300">
-                        {money(y.contributions)}
-                      </td>
-                      <td className="py-1.5 pr-2 tabular-nums text-gray-300">
-                        {money(y.dividendsCash)}
-                      </td>
-                      <td className="py-1.5 pr-2 tabular-nums text-gray-300">
-                        {money(y.dividendsReinvested)}
-                      </td>
-                      <td className="py-1.5 pr-2 tabular-nums text-gray-400">
-                        {money(y.fees)}
-                      </td>
-                      <td className="py-1.5 pr-2 tabular-nums text-amber-100/90">
-                        {money(y.incomeTax)}
-                      </td>
-                      <td className="py-1.5 tabular-nums text-amber-100/90">
-                        {money(y.cgtTax)}
-                      </td>
-                    </tr>
-                  ))}
+                  {years.map((y, i) => {
+                    const prev = i > 0 ? years[i - 1]!.endValue : null;
+                    const yoyPct =
+                      prev != null && prev > 0
+                        ? ((y.endValue - prev) / prev) * 100
+                        : null;
+                    return (
+                      <tr
+                        key={y.year}
+                        className="border-t border-gray-800/80"
+                      >
+                        <td className="py-1.5 pr-2 tabular-nums text-gray-300">
+                          {y.year}
+                        </td>
+                        <td className="py-1.5 pr-2 tabular-nums text-gray-100">
+                          {money(y.endValue)}
+                        </td>
+                        <td
+                          className={`py-1.5 pr-2 tabular-nums ${
+                            yoyPct == null
+                              ? "text-gray-500"
+                              : yoyPct >= 0
+                                ? "text-emerald-300/90"
+                                : "text-red-300/90"
+                          }`}
+                        >
+                          {yoyPct == null ? "—" : pct(yoyPct)}
+                        </td>
+                        <td className="py-1.5 pr-2 tabular-nums text-gray-300">
+                          {money(y.contributions)}
+                        </td>
+                        <td className="py-1.5 pr-2 tabular-nums text-gray-300">
+                          {money(y.dividendsCash)}
+                        </td>
+                        <td className="py-1.5 pr-2 tabular-nums text-gray-300">
+                          {money(y.dividendsReinvested)}
+                        </td>
+                        <td className="py-1.5 pr-2 tabular-nums text-gray-400">
+                          {money(y.fees)}
+                        </td>
+                        <td className="py-1.5 pr-2 tabular-nums text-amber-100/90">
+                          {money(y.incomeTax)}
+                        </td>
+                        <td className="py-1.5 tabular-nums text-amber-100/90">
+                          {money(y.cgtTax)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
           )}
           <p className="mt-2 text-xs text-gray-500">
-            Annual totals from the simulation (estimates only). CGT here is
-            in-horizon (e.g. drawdown); exit CGT at liquidation is in the
-            summary table above.
+            YoY value = change in portfolio end value (includes contributions
+            and reinvested divs). CGT here is in-horizon (e.g. drawdown); exit
+            CGT is in the summary above.
           </p>
         </div>
       )}
@@ -2407,6 +2725,9 @@ function ResultsTable({
   report: ScenarioReport;
   emphasizeTax?: boolean;
 }) {
+  const years = report.horizonYears;
+  const metrics = report.allocations.map((a) => allocPctMetrics(a, years));
+
   return (
     <div className="overflow-auto rounded-lg border border-gray-800">
       <table className="w-full min-w-[720px] text-left text-sm">
@@ -2435,25 +2756,32 @@ function ResultsTable({
         <tbody>
           <MetricRow
             label="Capital you put in (start + contributions)"
-            values={report.allocations.map((a) =>
-              money(a.totalCapitalIn ?? a.totalContributions),
+            values={metrics.map((m) => money(m.capitalIn))}
+          />
+          <MetricRow
+            label="Portfolio value only (before exit CGT)"
+            values={metrics.map((m, i) =>
+              moneyPct(
+                report.allocations[i]!.finalValue,
+                m.portfolioMultiple != null
+                  ? (m.portfolioMultiple - 1) * 100
+                  : null,
+              ),
             )}
           />
           <MetricRow
-            label="Portfolio value only (capital — before exit CGT)"
-            values={report.allocations.map((a) => money(a.finalValue))}
-          />
-          <MetricRow
             label="Cash dividends taken out (not in portfolio value)"
-            values={report.allocations.map((a) => money(a.totalDividendsCash))}
+            values={report.allocations.map((a) => {
+              const cap = a.totalCapitalIn ?? a.totalContributions ?? 0;
+              const p =
+                cap > 0 ? (a.totalDividendsCash / cap) * 100 : null;
+              return moneyPct(a.totalDividendsCash, p);
+            })}
           />
           <MetricRow
             label="Total wealth before exit CGT (portfolio + cash divs)"
-            values={report.allocations.map((a) =>
-              money(
-                a.totalWealthBeforeExitCgt ??
-                  a.finalValue + a.totalDividendsCash,
-              ),
+            values={metrics.map((m) =>
+              moneyPct(m.wealthBeforeExitCgt, m.wealthGrowthPct),
             )}
             emphasize
           />
@@ -2461,58 +2789,82 @@ function ResultsTable({
             <>
               <MetricRow
                 label="Income tax along the way (divs)"
-                values={report.allocations.map((a) => money(a.totalIncomeTax))}
+                values={report.allocations.map((a) => {
+                  const cap = a.totalCapitalIn ?? a.totalContributions ?? 0;
+                  const p =
+                    cap > 0 ? (a.totalIncomeTax / cap) * 100 : null;
+                  return moneyPct(a.totalIncomeTax, p);
+                })}
                 highlight="amber"
               />
               <MetricRow
                 label="Capital gain if you sell (value − cost)"
-                values={report.allocations.map((a) =>
-                  money(a.exitCapitalGain ?? 0),
-                )}
+                values={report.allocations.map((a) => {
+                  const gain = a.exitCapitalGain ?? 0;
+                  const cost =
+                    a.finalValue - gain > 0 ? a.finalValue - gain : 0;
+                  const p = cost > 0 ? (gain / cost) * 100 : null;
+                  return moneyPct(gain, p);
+                })}
                 highlight="amber"
               />
               <MetricRow
                 label="Exit CGT if you sell"
-                values={report.allocations.map((a) =>
-                  money(a.exitCgtTax ?? a.totalCgtTax),
-                )}
+                values={report.allocations.map((a) => {
+                  const cgt = a.exitCgtTax ?? a.totalCgtTax;
+                  const gain = a.exitCapitalGain ?? 0;
+                  const p = gain > 0 ? (cgt / gain) * 100 : null;
+                  return moneyPct(cgt, p);
+                })}
                 highlight="amber"
               />
               <MetricRow
-                label="Total tax (income + CGT)"
-                values={report.allocations.map((a) =>
-                  money(a.totalIncomeTax + a.totalCgtTax),
-                )}
+                label="Total tax (income + CGT) · % of capital · tax take of gain"
+                values={metrics.map((m) => {
+                  const base = moneyPct(m.totalTax, m.taxOnCapitalPct);
+                  if (m.taxTakeOfGainPct == null) return base;
+                  return `${base}  (${pct(m.taxTakeOfGainPct, 0)} of gain)`;
+                })}
                 highlight="amber"
               />
             </>
           )}
           <MetricRow
             label="Portfolio cash after exit CGT (excludes cash divs already taken)"
-            values={report.allocations.map((a) => money(a.netIfLiquidated))}
+            values={report.allocations.map((a) => {
+              const cap = a.totalCapitalIn ?? a.totalContributions ?? 0;
+              const p =
+                cap > 0 ? (a.netIfLiquidated / cap - 1) * 100 : null;
+              return moneyPct(a.netIfLiquidated, p);
+            })}
           />
           <MetricRow
-            label="Net gain after tax (portfolio+cash divs − capital in − taxes)"
-            values={report.allocations.map((a) =>
-              money(
-                a.netGainAfterTax ??
-                  a.netIfLiquidated +
-                    a.totalDividendsCash -
-                    (a.totalCapitalIn ?? a.totalContributions) -
-                    a.totalIncomeTax,
-              ),
-            )}
+            label="Net gain after tax · return on capital · approx. CAGR"
+            values={metrics.map((m) => {
+              const base = moneyPct(m.netGain, m.netReturnPct);
+              if (m.approxCagrPct == null) return base;
+              return `${base}  ·  ${pct(m.approxCagrPct)} p.a.`;
+            })}
             emphasize
           />
           <MetricRow
             label="Dividends reinvested (already inside portfolio value)"
-            values={report.allocations.map((a) =>
-              money(a.totalDividendsReinvested),
-            )}
+            values={report.allocations.map((a) => {
+              const cap = a.totalCapitalIn ?? a.totalContributions ?? 0;
+              const p =
+                cap > 0
+                  ? (a.totalDividendsReinvested / cap) * 100
+                  : null;
+              return moneyPct(a.totalDividendsReinvested, p);
+            })}
           />
           <MetricRow
             label="Fees"
-            values={report.allocations.map((a) => money(a.totalFees))}
+            values={report.allocations.map((a) => {
+              const cap = a.totalCapitalIn ?? a.totalContributions ?? 0;
+              const p = cap > 0 ? (a.totalFees / cap) * 100 : null;
+              return moneyPct(a.totalFees, p);
+            })}
           />
         </tbody>
       </table>

@@ -42,6 +42,82 @@ function baseScenario(overrides: Partial<Scenario> = {}): Scenario {
   };
 }
 
+describe("planner engine DRP / income tax", () => {
+  it("reinvests full gross yield (tax paid outside) and still accrues income tax", () => {
+    // Zero growth, 12% annual yield → 1% per month on starting 10_000
+    // Month 1: div = 100; full reinvest → value 10_100; tax on 100 @ 39% = 39
+    const r = runScenario(
+      baseScenario({
+        initialValueAud: 10_000,
+        monthlyContributionAud: 0,
+        horizonYears: 1 / 12, // 1 month (rounded months = 1)
+        allocations: [
+          {
+            id: "one",
+            label: "One",
+            assets: [
+              {
+                label: "EQ",
+                weight: 1,
+                growthRate: 0,
+                yieldRate: 0.12,
+                mer: 0,
+                frankingPercent: 0,
+                reinvestDividends: true,
+              },
+            ],
+            exit: { type: "hold" },
+          },
+        ],
+      }),
+    );
+    const a = r.allocations[0]!;
+    expect(a.totalDividendsReinvested).toBeCloseTo(100, 0);
+    // Full reinvest: final value ≈ 10_000 + 100
+    expect(a.finalValue).toBeCloseTo(10_100, 0);
+    expect(a.totalIncomeTax).toBeCloseTo(39, 0);
+  });
+
+  it("applies franking refund (negative net tax) instead of clamping to zero", () => {
+    // Fully franked: $70 cash → credits 30; at MTR 0 (no medicare) net tax = -30
+    const low: typeof profile = {
+      label: "Low",
+      marginalRate: 0,
+      medicareLevy: 0,
+    };
+    const r = runScenario(
+      baseScenario({
+        taxProfile: low,
+        initialValueAud: 7_000,
+        monthlyContributionAud: 0,
+        horizonYears: 1 / 12,
+        allocations: [
+          {
+            id: "one",
+            label: "One",
+            assets: [
+              {
+                label: "AU",
+                weight: 1,
+                growthRate: 0,
+                yieldRate: 0.12, // 1%/mo → 70 on 7000
+                mer: 0,
+                frankingPercent: 100,
+                reinvestDividends: true,
+              },
+            ],
+            exit: { type: "hold" },
+          },
+        ],
+      }),
+    );
+    const a = r.allocations[0]!;
+    expect(a.totalDividendsReinvested).toBeCloseTo(70, 0);
+    expect(a.totalIncomeTax).toBeLessThan(0);
+    expect(a.finalValue).toBeCloseTo(7_070, 0);
+  });
+});
+
 describe("planner engine contributions", () => {
   it("flat monthly contributions accumulate into totalContributions", () => {
     // 2 years × 12 months × $500 = $12_000

@@ -2,21 +2,28 @@
  * Scenario planner engine — monthly simulation.
  *
  * Each month per allocation sleeve:
+ * 0. (Post–2027) Inflate cost base by assumed CPI (indexation)
  * 1. Contribution (+ optional brokerage fee)
  * 2. Capital growth only (monthly compound of annual growthRate)
  * 3. Yield on capital (monthly of annual yieldRate):
- *    - cash: income outside capital (value/cost base unchanged by the yield)
- *    - reinvest: net-of-tax yield added to value and cost base
+ *    - always taxed as dividend income (even when reinvested / DRP)
+ *    - cash: yield tracked outside capital (value/cost base unchanged)
+ *    - reinvest (DRP): **full** gross yield added to value and cost base;
+ *      income tax is assumed paid from outside the portfolio
  * 4. MER drag on value (not cost base)
  *
- * Tax: income tax on yield (simplified); CGT on liquidate / drawdown (avg cost).
+ * Tax: income tax on yield; CGT on liquidate / drawdown.
+ * Post–2027 CGT: indexed cost base; rate = max(MTR+Medicare, 30%); no 50% discount.
  *
  * growthRate + yieldRate are additive total-return components — do not strip
  * cash yield from capital (that zeroed CGT on high-yield strategies).
  */
 
 import { resolveInstrumentFromSeed } from "../instruments/resolve.js";
-import { estimateLiquidationCgt } from "../tax/cgt.js";
+import {
+  DEFAULT_CGT_INFLATION_RATE,
+  estimateLiquidationCgt,
+} from "../tax/cgt.js";
 import { estimateDividendTax } from "../tax/incomeTax.js";
 import type { CgtRegime, TaxProfile } from "../tax/types.js";
 import {
@@ -183,6 +190,13 @@ function runAllocation(
   const brokerage = scenario.brokeragePerContribution ?? 0;
   /** Per-strategy exit (e.g. growth liquidate, dividend hold) */
   const exit = alloc.exit ?? scenario.exit;
+  // Post-2027: inflate cost base each month. Legacy discount_50: nominal cost.
+  const useCostIndexation = regime === "indexation_min30";
+  const inflationAnnual = useCostIndexation
+    ? (scenario.inflationRateAnnual ?? DEFAULT_CGT_INFLATION_RATE)
+    : 0;
+  const inflationMonthly =
+    inflationAnnual > 0 ? monthlyRate(inflationAnnual) : 0;
 
   // Sleeve state: value + cost base (AUD), acquisition proxy for CGT
   const sleeves = assets.map((a) => {
@@ -224,6 +238,14 @@ function runAllocation(
   }
 
   for (let m = 0; m < months; m++) {
+    // Index existing cost base for the month (new capital this month is not
+    // inflated until subsequent months — approximates parcel timing).
+    if (inflationMonthly > 0) {
+      for (const s of sleeves) {
+        s.costBase *= 1 + inflationMonthly;
+      }
+    }
+
     const monthlyContrib = keyframes[m] ?? 0;
     const lump = lumps.get(m) ?? 0;
     const contribute = monthlyContrib + lump;
@@ -263,7 +285,7 @@ function runAllocation(
       // Capital growth only
       s.value *= 1 + g;
 
-      // Yield on post-growth capital
+      // Yield on post-growth capital — always a taxable dividend event
       const div = s.value * y;
       if (div > 0) {
         const franking = a.frankingPercent ?? 0;
@@ -272,17 +294,17 @@ function runAllocation(
           frankingPercent: franking,
           profile,
         });
-        const taxDue = Math.max(0, tax.netTax);
-        totalIncomeTax += taxDue;
-        yearIncomeTax += taxDue;
+        // Keep refundable franking (negative netTax); do not clamp to 0
+        totalIncomeTax += tax.netTax;
+        yearIncomeTax += tax.netTax;
 
         const reinvest = a.reinvestDividends === true;
 
         if (reinvest) {
-          // DRP: net-of-tax yield buys more units → value + cost base
-          const reinvestNet = Math.max(0, div - taxDue);
-          s.value += reinvestNet;
-          s.costBase += reinvestNet;
+          // Full DRP: entire gross yield reinvested; tax paid outside portfolio.
+          // Cost base of new units ≈ reinvested cash (full dividend), not net-of-tax.
+          s.value += div;
+          s.costBase += div;
           totalDividendsReinvested += div;
           yearDivReinv += div;
         } else {
@@ -355,12 +377,16 @@ function runAllocation(
       disposedDate: addMonthsIso(startDate, months),
       regime,
       profile,
+      // Cost already inflated monthly under post-2027; don't double-index
+      costBaseAlreadyIndexed: useCostIndexation,
+      annualInflationRate: useCostIndexation ? 0 : undefined,
     });
     exitCgtTax = cgt.tax;
     exitCapitalGain = Math.max(0, cgt.capitalGain);
     totalCgtTax += exitCgtTax;
   } else {
     // hold or drawdown-at-end: paper gain only; no final liquidation CGT
+    // finalCost is indexed under post-2027, so paper gain is on indexed base
     exitCapitalGain = Math.max(0, finalValue - finalCost);
   }
 
@@ -373,7 +399,8 @@ function runAllocation(
     exit.type === "hold" ? finalValue : finalValue - exitCgtTax;
 
   // Economic net: capital after exit CGT + cash divs kept − capital supplied − income tax
-  // (income tax assumed paid from cash yield / outside; fees already reduced finalValue)
+  // (income tax / franking refund assumed settled outside the portfolio; fees already
+  // reduced finalValue. totalIncomeTax can be negative when franking refunds apply.)
   const netGainAfterTax =
     netIfLiquidated + totalDividendsCash - totalCapitalIn - totalIncomeTax;
 
@@ -425,6 +452,7 @@ function applyProRataWithdrawal(
 ): number {
   const total = sleeves.reduce((s, x) => s + x.value, 0);
   if (total <= 0) return 0;
+  const costAlreadyIndexed = regime === "indexation_min30";
   let cgtTax = 0;
   for (const s of sleeves) {
     const portion = s.value / total;
@@ -439,6 +467,8 @@ function applyProRataWithdrawal(
       disposedDate,
       regime,
       profile,
+      costBaseAlreadyIndexed: costAlreadyIndexed,
+      annualInflationRate: costAlreadyIndexed ? 0 : undefined,
     });
     cgtTax += cgt.tax;
     s.value -= take;

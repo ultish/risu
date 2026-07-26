@@ -1,22 +1,7 @@
 /**
- * TaxSettingsPanel — you / partner marginal rates + Medicare levy (Phase 3).
- *
- * Wire-up in App.tsx:
- *
- *   import { TaxSettingsPanel } from "./TaxSettingsPanel";
- *   import { Disclaimer } from "./Disclaimer";
- *
- *   // extend tab union with "tax"
- *   // nav: ["tax", "Tax settings"]
- *
- *   {tab === "tax" && (
- *     <>
- *       <TaxSettingsPanel />
- *       <div className="mt-4"><Disclaimer /></div>
- *     </>
- *   )}
- *
- * Uses GET/PUT /api/settings/tax-profiles
+ * TaxSettingsPanel — you / partner marginal rates + Medicare levy.
+ * Used by the planner (and any restored income estimates).
+ * GET/PUT /api/settings/tax-profiles
  */
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -265,7 +250,10 @@ export function TaxSettingsPanel() {
             Post 1 Jul 2027 simplified model: long-term effective rate floored
             at 30% of the gain.
           </li>
-          <li>Planner exit uses the regime toggle (auto / discount / min30).</li>
+          <li>
+            Planner CGT (post–Jul 2027): indexed cost base; rate =
+            max(this combined rate, 30%) on the indexed gain — no 50% discount.
+          </li>
         </ul>
       </div>
 

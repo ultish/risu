@@ -519,7 +519,8 @@ app.get("/api/holdings", (c) => {
   });
 });
 
-// ─── Income (cash dividends by AU FY) ───────────────────────────────────────
+// ─── Income (assessable dividends by AU FY; cash + DRP, de-duped) ───────────
+// UI tab removed for now; endpoint kept for restore / tooling.
 
 app.get("/api/income", (c) => {
   const portfolioId = c.req.query("portfolioId") || c.req.query("accountId");
@@ -1680,8 +1681,9 @@ app.post("/api/planner/run", async (c) => {
     startDate: body.startDate,
     initialValueAud: body.initialValueAud ?? 0,
     initialCostBaseAud: body.initialCostBaseAud,
+    inflationRateAnnual: body.inflationRateAnnual,
     taxProfile,
-    cgtRegime: body.cgtRegime ?? "auto_by_date",
+    cgtRegime: body.cgtRegime ?? "indexation_min30",
     monthlyContributionAud: body.monthlyContributionAud ?? 0,
     contributionKeyframes: body.contributionKeyframes,
     lumpSums: body.lumpSums,

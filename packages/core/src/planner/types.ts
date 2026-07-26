@@ -71,6 +71,12 @@ export type Scenario = {
   taxProfile: TaxProfile;
   cgtRegime: CgtRegime;
   /**
+   * Assumed CPI / cost-base indexation rate p.a. (decimal) for post–Jul 2027.
+   * Default 2.5%. Used to inflate cost base each month under `indexation_min30`.
+   * Ignored for legacy `discount_50`.
+   */
+  inflationRateAnnual?: number;
+  /**
    * Flat monthly contribution if no keyframes.
    * Keyframes override piecewise.
    */
@@ -153,4 +159,4 @@ export type ScenarioReport = {
 };
 
 export const PLANNER_DISCLAIMER =
-  "Estimates only — not financial, tax, or investment advice. Planner is for new buys under post–Jul 2027 CGT rules (growth vs dividend tax path), not historical lots. CGT uses average cost and a simplified regime model (not full CPI indexation). Not ATO software.";
+  "Estimates only — not financial, tax, or investment advice. Planner is for new buys under post–Jul 2027 CGT: cost base CPI-indexed (assumed inflation); no 50% discount; CGT rate = max(MTR+Medicare, 30%) on the indexed gain. Average cost; not ATO software.";

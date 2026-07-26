@@ -159,13 +159,16 @@ describe("estimateFyDividendTax", () => {
     // franking on ASX 100%: 30
     expect(fy.frankingCredits).toBe(30);
     expect(fy.withheldEstimate).toBe(15);
-    // assessable income 170+30=200; tax 200*0.39-30=48
+    // assessable income 170+30=200; gross tax 78; after franking 48
     expect(fy.assessableIncome).toBe(200);
-    expect(fy.netTax).toBe(48);
-    expect(summary.totals.netTax).toBe(48);
+    expect(fy.grossTax).toBe(78);
+    // FITO proxy: min(withheld 15, foreign gross tax 39, after franking 48) = 15
+    expect(fy.fitoEstimate).toBe(15);
+    expect(fy.netTax).toBe(33);
+    expect(summary.totals.netTax).toBe(33);
   });
 
-  it("when ledger is gross, does not gross up foreign cash", () => {
+  it("when ledger is gross, does not gross up foreign cash and applies FITO", () => {
     const summary = estimateFyDividendTax(
       [
         {
@@ -185,7 +188,9 @@ describe("estimateFyDividendTax", () => {
     expect(fy.assessableCashAud).toBe(100);
     expect(fy.withheldEstimate).toBe(15);
     expect(fy.frankingCredits).toBe(0);
-    expect(fy.netTax).toBe(39);
+    // gross tax 39; FITO min(15, 39, 39) = 15 → net 24
+    expect(fy.fitoEstimate).toBe(15);
+    expect(fy.netTax).toBe(24);
   });
 
   it("skips null amountAud lines", () => {

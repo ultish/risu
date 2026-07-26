@@ -16,11 +16,13 @@ export type TaxProfile = {
 /**
  * CGT modelling regime (AU resident, worldwide assets in AUD).
  *
- * - `discount_50` — classic 50% CGT discount when held ≥ 365 days
- * - `indexation_min30` — post–1 Jul 2027 simplified model: effective tax on
- *   long-term gains floored at 30% of the gain (see cgt.ts docs)
- * - `auto_by_date` — use discount_50 for disposal date &lt; 2027-07-01,
- *   indexation_min30 on/after that date
+ * - `indexation_min30` — **post–1 Jul 2027 / planner default**:
+ *   CPI-index cost base; no 50% discount; tax rate on indexed gain =
+ *   max(MTR+Medicare, 30%).
+ * - `discount_50` — **legacy only** (optional compare): nominal cost;
+ *   50% CGT discount when held ≥ 365 days
+ * - `auto_by_date` — disposal &lt; 2027-07-01 → discount_50;
+ *   disposal ≥ 2027-07-01 → indexation_min30
  */
 export type CgtRegime = "discount_50" | "indexation_min30" | "auto_by_date";
 

@@ -1,26 +1,9 @@
 /**
- * DrpCheckPanel — DRP/DRIP expected vs imported check (Phase 2).
+ * DrpCheckPanel — DRP/DRIP expected vs imported check.
  *
- * Wire-up in App.tsx (do not gut App — add tab only):
- *
- *   import { DrpCheckPanel } from "./DrpCheckPanel";
- *
- *   // extend tab union with "drp"
- *   // nav: ["drp", "DRP check"]
- *
- *   {tab === "drp" && (
- *     <DrpCheckPanel
- *       portfolioId={portfolioId === "all" ? portfolios[0]?.id : portfolioId}
- *       holdings={holdings}
- *     />
- *   )}
- *
- * APIs:
- *   GET  /api/holdings/flags?portfolioId=
- *   PUT  /api/holdings/flags  { portfolioId, ticker, exchange, drpEnabled, drpFromDate }
- *   GET  /api/drp-check?portfolioId=&ticker=&exchange=
- *
+ * APIs: GET/PUT /api/holdings/flags, GET /api/drp-check
  * Does NOT write ledger transactions — suggestions are for user confirmation.
+ * Requires a specific portfolio (not "All").
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {

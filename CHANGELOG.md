@@ -10,6 +10,25 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ### Added
 - Planner instrument fill: BetaShares/Vanguard **seed** + optional manual **Refresh** (Yahoo trailing yield / hist. growth estimate); SQLite `instrument_cache` (once per click, not on page load)
 
+### Changed
+- **Planner / post–Jul 2027 CGT** (aligned with planning rules you care about):
+  - **CPI-index cost base** each month (assumed inflation %, default 2.5% p.a., editable)
+  - **No 50% CGT discount**
+  - Tax rate on indexed gain = **max(MTR+Medicare, 30%)** (30% floor if MTR is low/zero; high MTR still pays full MTR, e.g. 47%)
+  - Legacy 50% discount optional side-by-side only (off by default)
+- **Planner results**: at-a-glance % cards (net return, approx. CAGR, wealth growth, tax/capital, tax take of gain, portfolio multiple); $ rows show “· +X%” vs capital in; year-by-year YoY portfolio value %
+- **Switch at end**: redeploys net of one sale CGT — reuses main-sim exit CGT when phase‑1 is **Sell all at end** (no double tax); estimates CGT only when phase‑1 was **Hold**/drawdown; UI states phase‑2 **cost base resets** to net purchase (indexation restarts — no carry of phase‑1 indexed cost)
+- **Nav simplified** to 6 top tabs: Holdings · Transactions · Import · Tax · Planner · Settings. Import sub-modes (file / paste / manual); Tax sub-modes (profiles / DRP check); Portfolios moved under Settings
+- **Assessable dividends** (core + `GET /api/income`): include DRP/reinvest amounts as taxable income; skip DRP only when a nearby equal cash dividend exists (avoids double-count; still counts partial DRP)
+- **Planner DRP**: reinvests full gross yield into value and cost base; income tax settled outside the portfolio (was reinvest-net-of-tax, which understated compounding and cost base)
+- **Planner franking**: keeps refundable franking credits (negative net tax) instead of clamping tax to zero
+- **FY dividend tax estimate**: simple FITO proxy — residual tax reduced by min(withholding, foreign-attributable tax); still not ATO FITO software
+- Planner “seed from holdings” copy: clarifies cost base is set to market (new-money model), not holdings historical cost
+- DRP check requires a specific portfolio (no silent fallback to the first portfolio when “All” is selected)
+
+### Removed
+- **Income** tab (FY cash dividend summary + tax sketch) — not useful enough for now; core helpers and `GET /api/income` remain if we restore later
+
 ### Planned
 - Optional EODHD (or other) market-data provider behind the same interface as Yahoo
 - Full CPI-indexed CGT cost base (planner still uses simplified post‑2027 floor)

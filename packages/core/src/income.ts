@@ -15,11 +15,14 @@ export type IncomeLine = {
   financialYear: string;
   exchange: string;
   currency: string;
-  /** Sum of cash dividends in trade currency */
+  /** Sum of assessable dividend amounts in trade currency */
   amount: number;
   /** AUD converted when FX available; else null for non-AUD */
   amountAud: number | null;
   count: number;
+  /** How many rows were cash dividends vs DRP-only (reinvest still taxable) */
+  cashCount: number;
+  drpCount: number;
 };
 
 export type IncomeSummary = {
@@ -30,61 +33,145 @@ export type IncomeSummary = {
     amountAud: number | null;
     amountNativeMixed: number;
     count: number;
+    cashCount: number;
+    drpCount: number;
   }>;
   grandTotalAud: number | null;
   missingFx: string[];
+  notes: string[];
 };
 
+type TxPick = Pick<
+  ParsedTransaction,
+  | "date"
+  | "type"
+  | "amount"
+  | "currency"
+  | "exchange"
+  | "quantity"
+  | "price"
+  | "ticker"
+>;
+
 /**
- * Summarise `dividend_cash` ledger rows by AU financial year and exchange/currency.
+ * Native amount for a dividend / DRP row (prefer amount; else price × qty).
+ */
+export function dividendRowAmount(t: {
+  amount: number | null;
+  price: number | null;
+  quantity: number;
+}): number {
+  if (t.amount != null && Number.isFinite(t.amount) && t.amount !== 0) {
+    return Math.abs(t.amount);
+  }
+  if (t.price != null && t.quantity) {
+    return Math.abs(t.price * t.quantity);
+  }
+  return 0;
+}
+
+/**
+ * Summarise assessable dividend income by AU financial year and exchange/currency.
+ *
+ * Includes:
+ * - all `dividend_cash` rows
+ * - `drp` rows that are **not** duplicates of a nearby cash dividend
+ *   (same ticker + exchange, within ±7 days, amounts roughly equal).
+ *
+ * Rationale: AU tax — a dividend is assessable even when reinvested via DRP.
+ * Cost base of DRP lots is separate; this rollup is income only.
+ *
+ * When both cash and DRP exist for the same event (common full-DRP exports),
+ * only cash is counted. When only DRP is imported (Sharesight All Trades style),
+ * the DRP amount is treated as assessable. Partial DRP (cash + reinvest, different
+ * amounts) counts both.
+ *
  * Pass Yahoo-style FX map (e.g. `{ "AUDUSD=X": 0.65 }`) to convert foreign cash to AUD.
  */
 export function summarizeDividendIncome(
-  transactions: Array<
-    Pick<
-      ParsedTransaction,
-      "date" | "type" | "amount" | "currency" | "exchange" | "quantity" | "price"
-    >
-  >,
+  transactions: TxPick[],
   fxRates: Record<string, number | null | undefined> = {},
 ): IncomeSummary {
-  const cash = transactions.filter((t) => t.type === "dividend_cash");
+  const cashRows = transactions.filter((t) => t.type === "dividend_cash");
+  const drpRows = transactions.filter((t) => t.type === "drp");
+
+  const notes: string[] = [
+    "Includes cash dividends and DRP/reinvest amounts (assessable even when reinvested).",
+    "DRP rows near an equal cash dividend for the same instrument are skipped to avoid double-count.",
+  ];
+
+  type Event = {
+    date: string;
+    ticker: string;
+    exchange: string;
+    currency: string;
+    amount: number;
+    source: "cash" | "drp";
+  };
+
+  const events: Event[] = [];
+
+  for (const t of cashRows) {
+    const amount = dividendRowAmount(t);
+    if (!amount) continue;
+    events.push({
+      date: t.date,
+      ticker: (t.ticker || "").toUpperCase(),
+      exchange: (t.exchange || "ASX").toUpperCase(),
+      currency: (t.currency || "AUD").toUpperCase(),
+      amount,
+      source: "cash",
+    });
+  }
+
+  for (const t of drpRows) {
+    const amount = dividendRowAmount(t);
+    if (!amount) continue;
+    const ticker = (t.ticker || "").toUpperCase();
+    const exchange = (t.exchange || "ASX").toUpperCase();
+    if (hasMatchingCashDividend(cashRows, ticker, exchange, t.date, amount)) {
+      continue;
+    }
+    events.push({
+      date: t.date,
+      ticker,
+      exchange,
+      currency: (t.currency || "AUD").toUpperCase(),
+      amount,
+      source: "drp",
+    });
+  }
+
   const bucket = new Map<string, IncomeLine>();
   const missingFx = new Set<string>();
 
-  for (const t of cash) {
-    const fy = auFinancialYear(t.date);
-    const exchange = (t.exchange || "ASX").toUpperCase();
-    const currency = (t.currency || "AUD").toUpperCase();
-    // Prefer amount; fall back to price × qty for incomplete rows
-    const amount =
-      t.amount != null
-        ? t.amount
-        : t.price != null && t.quantity
-          ? t.price * t.quantity
-          : 0;
-    if (!amount) continue;
-
-    const key = `${fy}|${exchange}|${currency}`;
+  for (const e of events) {
+    const fy = auFinancialYear(e.date);
+    const key = `${fy}|${e.exchange}|${e.currency}`;
     const cur = bucket.get(key) ?? {
       financialYear: fy,
-      exchange,
-      currency,
+      exchange: e.exchange,
+      currency: e.currency,
       amount: 0,
       amountAud: 0,
       count: 0,
+      cashCount: 0,
+      drpCount: 0,
     };
-    cur.amount += amount;
-    const aud = toAud(amount, currency, fxRates);
-    if (aud == null && currency !== "AUD") {
-      missingFx.add(currency);
+    cur.amount += e.amount;
+    cur.count += 1;
+    if (e.source === "cash") cur.cashCount += 1;
+    else cur.drpCount += 1;
+
+    const aud = toAud(e.amount, e.currency, fxRates);
+    if (aud == null && e.currency !== "AUD") {
+      missingFx.add(e.currency);
       cur.amountAud = cur.amountAud === 0 ? null : cur.amountAud;
     } else if (aud != null) {
       cur.amountAud = (cur.amountAud ?? 0) + aud;
     } else {
-      cur.amountAud = (cur.amountAud ?? 0) + amount;
+      cur.amountAud = (cur.amountAud ?? 0) + e.amount;
     }
-    cur.count += 1;
     bucket.set(key, cur);
   }
 
@@ -92,8 +179,7 @@ export function summarizeDividendIncome(
     .map((line) => ({
       ...line,
       amount: round2(line.amount),
-      amountAud:
-        line.amountAud == null ? null : round2(line.amountAud),
+      amountAud: line.amountAud == null ? null : round2(line.amountAud),
     }))
     .sort((a, b) => {
       const fy = b.financialYear.localeCompare(a.financialYear);
@@ -105,7 +191,15 @@ export function summarizeDividendIncome(
 
   const fyMap = new Map<
     string,
-    { financialYear: string; amountAud: number | null; amountNativeMixed: number; count: number; hasMissing: boolean }
+    {
+      financialYear: string;
+      amountAud: number | null;
+      amountNativeMixed: number;
+      count: number;
+      cashCount: number;
+      drpCount: number;
+      hasMissing: boolean;
+    }
   >();
   for (const line of byFy) {
     const cur = fyMap.get(line.financialYear) ?? {
@@ -113,10 +207,14 @@ export function summarizeDividendIncome(
       amountAud: 0,
       amountNativeMixed: 0,
       count: 0,
+      cashCount: 0,
+      drpCount: 0,
       hasMissing: false,
     };
     cur.amountNativeMixed += line.amount;
     cur.count += line.count;
+    cur.cashCount += line.cashCount;
+    cur.drpCount += line.drpCount;
     if (line.amountAud == null) {
       cur.hasMissing = true;
     } else {
@@ -128,9 +226,16 @@ export function summarizeDividendIncome(
   const fyTotals = [...fyMap.values()]
     .map((t) => ({
       financialYear: t.financialYear,
-      amountAud: t.hasMissing && t.amountAud === 0 ? null : t.amountAud == null ? null : round2(t.amountAud),
+      amountAud:
+        t.hasMissing && t.amountAud === 0
+          ? null
+          : t.amountAud == null
+            ? null
+            : round2(t.amountAud),
       amountNativeMixed: round2(t.amountNativeMixed),
       count: t.count,
+      cashCount: t.cashCount,
+      drpCount: t.drpCount,
     }))
     .sort((a, b) => b.financialYear.localeCompare(a.financialYear));
 
@@ -147,7 +252,6 @@ export function summarizeDividendIncome(
   }
   if (!anyAud) grandTotalAud = null;
   else if (anyMissing) {
-    // Partial AUD total is still useful; keep it
     grandTotalAud = round2(grandTotalAud ?? 0);
   } else {
     grandTotalAud = round2(grandTotalAud ?? 0);
@@ -158,7 +262,46 @@ export function summarizeDividendIncome(
     fyTotals,
     grandTotalAud,
     missingFx: [...missingFx].sort(),
+    notes,
   };
+}
+
+/**
+ * True when a cash dividend for the same instrument is nearby with a similar
+ * amount — treat DRP as the reinvest lot for that cash, not a second income event.
+ */
+function hasMatchingCashDividend(
+  cashRows: TxPick[],
+  ticker: string,
+  exchange: string,
+  date: string,
+  drpAmount: number,
+): boolean {
+  const tU = ticker.toUpperCase();
+  const eU = exchange.toUpperCase();
+  for (const c of cashRows) {
+    if ((c.ticker || "").toUpperCase() !== tU) continue;
+    if ((c.exchange || "ASX").toUpperCase() !== eU) continue;
+    if (!withinDays(c.date, date, 7)) continue;
+    const cashAmt = dividendRowAmount(c);
+    if (cashAmt <= 0) continue;
+    if (amountsRoughlyEqual(cashAmt, drpAmount)) return true;
+  }
+  return false;
+}
+
+function amountsRoughlyEqual(a: number, b: number): boolean {
+  const max = Math.max(Math.abs(a), Math.abs(b));
+  if (max < 1e-9) return true;
+  // $1 absolute or 5% relative — covers rounding / brokerage-free DRP lots
+  return Math.abs(a - b) <= Math.max(1, max * 0.05);
+}
+
+function withinDays(a: string, b: string, days: number): boolean {
+  const da = Date.parse(a);
+  const db = Date.parse(b);
+  if (Number.isNaN(da) || Number.isNaN(db)) return a === b;
+  return Math.abs(da - db) <= days * 86_400_000;
 }
 
 function round2(n: number) {

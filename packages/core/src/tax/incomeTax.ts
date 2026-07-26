@@ -243,13 +243,24 @@ export type FyTaxEstimateRow = {
    * withholding for foreign when derivable.
    */
   assessableCashAud: number;
+  /** Gross foreign assessable cash (subset of assessableCashAud) */
+  foreignAssessableCashAud: number;
   frankingCredits: number;
   assessableIncome: number;
   grossTax: number;
-  /** Net tax after franking offset (can be negative) */
+  /**
+   * Net tax after franking offset and a simple FITO proxy (can be negative
+   * when franking refund exceeds residual tax).
+   */
   netTax: number;
   /** Estimated foreign withholding (AUD) on foreign lines */
   withheldEstimate: number;
+  /**
+   * Simple foreign income tax offset applied: min(withheld,
+   * foreign-attributable gross tax, net tax after franking if positive).
+   * Not the ATO FITO engine.
+   */
+  fitoEstimate: number;
 };
 
 export type FyTaxEstimateSummary = {
@@ -257,11 +268,13 @@ export type FyTaxEstimateSummary = {
   totals: {
     cashAud: number;
     assessableCashAud: number;
+    foreignAssessableCashAud: number;
     frankingCredits: number;
     assessableIncome: number;
     grossTax: number;
     netTax: number;
     withheldEstimate: number;
+    fitoEstimate: number;
   };
   notes: string[];
 };
@@ -272,9 +285,11 @@ export type FyTaxEstimateSummary = {
  * - ASX lines: franking at `asxFrankingPercent` (default 70%); no withholding.
  * - Foreign (non-ASX & non-AUD): franking 0; optional withholding gross-up so
  *   assessable cash is gross (ATO typically wants gross foreign dividends).
+ * - Simple FITO proxy: offset residual tax by foreign withholding, capped at
+ *   foreign-attributable gross tax (non-refundable).
  * - Lines with null `amountAud` are skipped.
  *
- * Not a full tax return — no FITO, no other income, no offsets beyond franking.
+ * Not a full tax return — no other income, no progressive brackets.
  */
 export function estimateFyDividendTax(
   lines: FyDividendTaxLineInput[],
@@ -294,6 +309,7 @@ export function estimateFyDividendTax(
     financialYear: string;
     cashAud: number;
     assessableCashAud: number;
+    foreignAssessableCashAud: number;
     frankingCredits: number;
     withheldEstimate: number;
   };
@@ -310,6 +326,7 @@ export function estimateFyDividendTax(
       financialYear: fy,
       cashAud: 0,
       assessableCashAud: 0,
+      foreignAssessableCashAud: 0,
       frankingCredits: 0,
       withheldEstimate: 0,
     };
@@ -320,6 +337,7 @@ export function estimateFyDividendTax(
       const wh = applyForeignWithholding(ledger, whRate, ledgerIsNet);
       // ATO assessable base ≈ gross foreign dividend
       acc.assessableCashAud += wh.gross;
+      acc.foreignAssessableCashAud += wh.gross;
       acc.withheldEstimate += wh.withheld;
       // franking 0 — no credits added
     } else {
@@ -336,29 +354,37 @@ export function estimateFyDividendTax(
     fyMap.set(fy, acc);
   }
 
-  // Foreign lines need tax applied after aggregation (franking already rolled
-  // for domestic; apply MTR on foreign assessable cash without franking).
-  // Simpler: recompute net tax from totals per FY using batch on virtual lines.
   const byFy: FyTaxEstimateRow[] = [...fyMap.values()]
     .map((acc) => {
-      // Reconstruct: domestic portion has franking credits already;
-      // total assessable income = assessableCash + frankingCredits
       const cashAud = round2(acc.cashAud);
       const assessableCashAud = round2(acc.assessableCashAud);
+      const foreignAssessableCashAud = round2(acc.foreignAssessableCashAud);
       const frankingCredits = round2(acc.frankingCredits);
       const assessableIncome = round2(assessableCashAud + frankingCredits);
       const mtr = combinedMarginalRate(profile);
       const grossTax = round2(assessableIncome * mtr);
-      const netTax = round2(grossTax - frankingCredits);
+      const afterFranking = round2(grossTax - frankingCredits);
+      const withheldEstimate = round2(acc.withheldEstimate);
+      // FITO proxy: non-refundable; cannot create a refund; capped at tax on foreign gross
+      const foreignGrossTax = round2(foreignAssessableCashAud * mtr);
+      const fitoEstimate =
+        afterFranking > 0 && withheldEstimate > 0
+          ? round2(
+              Math.min(withheldEstimate, foreignGrossTax, afterFranking),
+            )
+          : 0;
+      const netTax = round2(afterFranking - fitoEstimate);
       return {
         financialYear: acc.financialYear,
         cashAud,
         assessableCashAud,
+        foreignAssessableCashAud,
         frankingCredits,
         assessableIncome,
         grossTax,
         netTax,
-        withheldEstimate: round2(acc.withheldEstimate),
+        withheldEstimate,
+        fitoEstimate,
       };
     })
     .sort((a, b) => b.financialYear.localeCompare(a.financialYear));
@@ -366,27 +392,31 @@ export function estimateFyDividendTax(
   const totals = {
     cashAud: 0,
     assessableCashAud: 0,
+    foreignAssessableCashAud: 0,
     frankingCredits: 0,
     assessableIncome: 0,
     grossTax: 0,
     netTax: 0,
     withheldEstimate: 0,
+    fitoEstimate: 0,
   };
   for (const row of byFy) {
     totals.cashAud += row.cashAud;
     totals.assessableCashAud += row.assessableCashAud;
+    totals.foreignAssessableCashAud += row.foreignAssessableCashAud;
     totals.frankingCredits += row.frankingCredits;
     totals.assessableIncome += row.assessableIncome;
     totals.grossTax += row.grossTax;
     totals.netTax += row.netTax;
     totals.withheldEstimate += row.withheldEstimate;
+    totals.fitoEstimate += row.fitoEstimate;
   }
   for (const k of Object.keys(totals) as Array<keyof typeof totals>) {
     totals[k] = round2(totals[k]);
   }
 
   const notes = [
-    "Estimates only — not ATO software or a foreign income tax offset calculation.",
+    "Estimates only — not ATO software. Simple FITO proxy only (not full foreign income tax offset rules).",
     `ASX franking assumption ${asxFranking}%; foreign franking 0%.`,
     `Foreign withholding assumption ${(clamp(whRate, 0, 0.99) * 100).toFixed(1)}%` +
       (ledgerIsNet

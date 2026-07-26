@@ -22,7 +22,6 @@ import {
 import { Disclaimer } from "./Disclaimer";
 import { DrpCheckPanel } from "./DrpCheckPanel";
 import ExportBar from "./ExportBar";
-import { IncomePanel } from "./IncomePanel";
 import PerformanceChart from "./PerformanceChart";
 import { PlannerPanel } from "./PlannerPanel";
 import { SettingsPanel } from "./SettingsPanel";
@@ -117,19 +116,19 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [yahooStatus, setYahooStatus] = useState<YahooStatus | null>(null);
+  /** Top-level nav — import/tax use sub-modes to keep the bar short */
   const [tab, setTab] = useState<
     | "holdings"
     | "transactions"
     | "import"
-    | "paste"
-    | "manual"
-    | "portfolios"
-    | "income"
-    | "drp"
     | "tax"
     | "planner"
     | "settings"
   >("holdings");
+  const [importSub, setImportSub] = useState<"file" | "paste" | "manual">(
+    "file",
+  );
+  const [taxSub, setTaxSub] = useState<"profiles" | "drp">("profiles");
 
   const [newPortfolioName, setNewPortfolioName] = useState("");
 
@@ -635,12 +634,7 @@ export default function App() {
           [
             ["holdings", "Holdings"],
             ["transactions", "Transactions"],
-            ["income", "Income"],
-            ["drp", "DRP check"],
-            ["paste", "Paste Sharesight"],
-            ["import", "Import file"],
-            ["manual", "Add trade"],
-            ["portfolios", "Portfolios"],
+            ["import", "Import"],
             ["tax", "Tax"],
             ["planner", "Planner"],
             ["settings", "Settings"],
@@ -908,385 +902,406 @@ export default function App() {
         </Panel>
       )}
 
-      {tab === "paste" && (
-        <Panel title="Paste Sharesight holding trades">
-          <p className="mb-4 text-sm text-gray-400">
-            <strong className="text-gray-200">Portfolio</strong> = whose book
-            (you / partner). <strong className="text-gray-200">Broker</strong> =
-            where it is held (Stake, CommSec…). Source is recorded as{" "}
-            <code className="text-gray-300">sharesight_paste</code>.
-          </p>
-          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Field label="Portfolio">
-              <select
-                className="field"
-                value={paste.portfolioId || ""}
-                onChange={(e) =>
-                  setPaste((p) => ({
-                    ...p,
-                    portfolioId: Number(e.target.value),
-                  }))
-                }
-              >
-                {portfolios.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Broker (held at)">
-              <select
-                className="field"
-                value={paste.broker}
-                onChange={(e) =>
-                  setPaste((p) => ({ ...p, broker: e.target.value }))
-                }
-              >
-                {BROKERS.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Ticker">
-              <input
-                className="field"
-                value={paste.ticker}
-                onChange={(e) =>
-                  setPaste((p) => ({ ...p, ticker: e.target.value }))
-                }
-                placeholder="TSLA"
-              />
-            </Field>
-            <Field label="Exchange">
-              <select
-                className="field"
-                value={paste.exchange}
-                onChange={(e) =>
-                  setPaste((p) => ({ ...p, exchange: e.target.value }))
-                }
-              >
-                <option value="US">US</option>
-                <option value="ASX">ASX</option>
-                <option value="LSE">LSE</option>
-              </select>
-            </Field>
-          </div>
-          <Field label="Paste trades">
-            <textarea
-              className="field mt-1 min-h-[220px] font-mono text-xs"
-              placeholder={`10 Jun 2025\nBuy\n1.00889087\nUS$312.68\n...`}
-              value={paste.text}
-              onChange={(e) =>
-                setPaste((p) => ({ ...p, text: e.target.value }))
-              }
-            />
-          </Field>
-          <button
-            type="button"
-            disabled={busy || !paste.text.trim()}
-            onClick={() => void onPasteImport()}
-            className="mt-4 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
-          >
-            {busy ? "Importing…" : "Import paste"}
-          </button>
-          {pasteResult && (
-            <p className="mt-3 text-sm text-emerald-300">
-              Parsed {pasteResult.parsed}, imported {pasteResult.imported},
-              duplicates skipped {pasteResult.duplicatesSkipped}
-            </p>
-          )}
-        </Panel>
-      )}
-
       {tab === "import" && (
-        <Panel title="Import broker / Sharesight file">
-          <p className="mb-4 text-sm text-gray-400">
-            File goes into a <strong className="text-gray-200">portfolio</strong>
-            . Set <strong className="text-gray-200">broker</strong> to custody
-            (Stake etc.). Parser only decides how to read the file.
-          </p>
-          <div className="grid gap-4 sm:grid-cols-3">
-            <label className="block text-sm">
-              <span className="mb-1 block text-gray-400">Portfolio</span>
-              <select
-                className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
-                value={portfolioId === "all" ? "" : String(portfolioId)}
-                onChange={(e) => setPortfolioId(Number(e.target.value))}
+        <div className="space-y-4">
+          <SubNav<"file" | "paste" | "manual">
+            options={[
+              ["file", "Import file"],
+              ["paste", "Paste Sharesight"],
+              ["manual", "Add trade"],
+            ]}
+            value={importSub}
+            onChange={setImportSub}
+          />
+
+          {importSub === "file" && (
+            <Panel title="Import broker / Sharesight file">
+              <p className="mb-4 text-sm text-gray-400">
+                File goes into a{" "}
+                <strong className="text-gray-200">portfolio</strong>. Set{" "}
+                <strong className="text-gray-200">broker</strong> to custody
+                (Stake etc.). Parser only decides how to read the file.
+              </p>
+              <div className="grid gap-4 sm:grid-cols-3">
+                <label className="block text-sm">
+                  <span className="mb-1 block text-gray-400">Portfolio</span>
+                  <select
+                    className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
+                    value={portfolioId === "all" ? "" : String(portfolioId)}
+                    onChange={(e) => setPortfolioId(Number(e.target.value))}
+                  >
+                    <option value="" disabled>
+                      Select portfolio…
+                    </option>
+                    {portfolios.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-sm">
+                  <span className="mb-1 block text-gray-400">File parser</span>
+                  <select
+                    className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
+                    value={parser}
+                    onChange={(e) => setParser(e.target.value)}
+                  >
+                    {PARSERS.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="block text-sm">
+                  <span className="mb-1 block text-gray-400">
+                    Broker (custody)
+                  </span>
+                  <select
+                    className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
+                    value={importBroker}
+                    onChange={(e) => setImportBroker(e.target.value)}
+                  >
+                    {BROKERS.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <label className="mt-4 block text-sm">
+                <span className="mb-1 block text-gray-400">CSV or XLSX</span>
+                <input
+                  type="file"
+                  accept=".csv,.xlsx,.xls,text/csv"
+                  className="block w-full text-sm text-gray-300 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-500/20 file:px-3 file:py-2 file:text-emerald-200"
+                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                />
+              </label>
+              <button
+                type="button"
+                disabled={busy || !file}
+                onClick={() => void onImport()}
+                className="mt-5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
               >
-                <option value="" disabled>
-                  Select portfolio…
-                </option>
-                {portfolios.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block text-sm">
-              <span className="mb-1 block text-gray-400">File parser</span>
-              <select
-                className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
-                value={parser}
-                onChange={(e) => setParser(e.target.value)}
-              >
-                {PARSERS.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="block text-sm">
-              <span className="mb-1 block text-gray-400">Broker (custody)</span>
-              <select
-                className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
-                value={importBroker}
-                onChange={(e) => setImportBroker(e.target.value)}
-              >
-                {BROKERS.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <label className="mt-4 block text-sm">
-            <span className="mb-1 block text-gray-400">CSV or XLSX</span>
-            <input
-              type="file"
-              accept=".csv,.xlsx,.xls,text/csv"
-              className="block w-full text-sm text-gray-300 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-500/20 file:px-3 file:py-2 file:text-emerald-200"
-              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
-            />
-          </label>
-          <button
-            type="button"
-            disabled={busy || !file}
-            onClick={() => void onImport()}
-            className="mt-5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
-          >
-            {busy ? "Importing…" : "Import"}
-          </button>
-          {importResult && (
-            <p className="mt-3 text-sm text-emerald-300">
-              Imported {importResult.imported} / {importResult.parsed} · source{" "}
-              {importResult.source} · broker {importResult.broker}
-            </p>
+                {busy ? "Importing…" : "Import"}
+              </button>
+              {importResult && (
+                <p className="mt-3 text-sm text-emerald-300">
+                  Imported {importResult.imported} / {importResult.parsed} ·
+                  source {importResult.source} · broker {importResult.broker}
+                </p>
+              )}
+            </Panel>
           )}
-        </Panel>
+
+          {importSub === "paste" && (
+            <Panel title="Paste Sharesight holding trades">
+              <p className="mb-4 text-sm text-gray-400">
+                <strong className="text-gray-200">Portfolio</strong> = whose
+                book (you / partner).{" "}
+                <strong className="text-gray-200">Broker</strong> = where it is
+                held (Stake, CommSec…). Source is recorded as{" "}
+                <code className="text-gray-300">sharesight_paste</code>.
+              </p>
+              <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                <Field label="Portfolio">
+                  <select
+                    className="field"
+                    value={paste.portfolioId || ""}
+                    onChange={(e) =>
+                      setPaste((p) => ({
+                        ...p,
+                        portfolioId: Number(e.target.value),
+                      }))
+                    }
+                  >
+                    {portfolios.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Broker (held at)">
+                  <select
+                    className="field"
+                    value={paste.broker}
+                    onChange={(e) =>
+                      setPaste((p) => ({ ...p, broker: e.target.value }))
+                    }
+                  >
+                    {BROKERS.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Ticker">
+                  <input
+                    className="field"
+                    value={paste.ticker}
+                    onChange={(e) =>
+                      setPaste((p) => ({ ...p, ticker: e.target.value }))
+                    }
+                    placeholder="TSLA"
+                  />
+                </Field>
+                <Field label="Exchange">
+                  <select
+                    className="field"
+                    value={paste.exchange}
+                    onChange={(e) =>
+                      setPaste((p) => ({ ...p, exchange: e.target.value }))
+                    }
+                  >
+                    <option value="US">US</option>
+                    <option value="ASX">ASX</option>
+                    <option value="LSE">LSE</option>
+                  </select>
+                </Field>
+              </div>
+              <Field label="Paste trades">
+                <textarea
+                  className="field mt-1 min-h-[220px] font-mono text-xs"
+                  placeholder={`10 Jun 2025\nBuy\n1.00889087\nUS$312.68\n...`}
+                  value={paste.text}
+                  onChange={(e) =>
+                    setPaste((p) => ({ ...p, text: e.target.value }))
+                  }
+                />
+              </Field>
+              <button
+                type="button"
+                disabled={busy || !paste.text.trim()}
+                onClick={() => void onPasteImport()}
+                className="mt-4 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
+              >
+                {busy ? "Importing…" : "Import paste"}
+              </button>
+              {pasteResult && (
+                <p className="mt-3 text-sm text-emerald-300">
+                  Parsed {pasteResult.parsed}, imported {pasteResult.imported},
+                  duplicates skipped {pasteResult.duplicatesSkipped}
+                </p>
+              )}
+            </Panel>
+          )}
+
+          {importSub === "manual" && (
+            <Panel title="Add trade manually">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Portfolio">
+                  <select
+                    className="field"
+                    value={manual.portfolioId || ""}
+                    onChange={(e) =>
+                      setManual((m) => ({
+                        ...m,
+                        portfolioId: Number(e.target.value),
+                      }))
+                    }
+                  >
+                    {portfolios.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Broker">
+                  <select
+                    className="field"
+                    value={manual.broker}
+                    onChange={(e) =>
+                      setManual((m) => ({ ...m, broker: e.target.value }))
+                    }
+                  >
+                    {BROKERS.map((b) => (
+                      <option key={b.id} value={b.id}>
+                        {b.label}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Date">
+                  <input
+                    type="date"
+                    className="field"
+                    value={manual.date}
+                    onChange={(e) =>
+                      setManual((m) => ({ ...m, date: e.target.value }))
+                    }
+                  />
+                </Field>
+                <Field label="Ticker">
+                  <input
+                    className="field"
+                    placeholder="VAS or AAPL"
+                    value={manual.ticker}
+                    onChange={(e) =>
+                      setManual((m) => ({ ...m, ticker: e.target.value }))
+                    }
+                  />
+                </Field>
+                <Field label="Exchange">
+                  <select
+                    className="field"
+                    value={manual.exchange}
+                    onChange={(e) => {
+                      const exchange = e.target.value;
+                      setManual((m) => ({
+                        ...m,
+                        exchange,
+                        currency:
+                          exchange === "US"
+                            ? "USD"
+                            : exchange === "LSE"
+                              ? "GBP"
+                              : "AUD",
+                      }));
+                    }}
+                  >
+                    <option value="ASX">ASX</option>
+                    <option value="US">US</option>
+                    <option value="LSE">LSE</option>
+                  </select>
+                </Field>
+                <Field label="Type">
+                  <select
+                    className="field"
+                    value={manual.type}
+                    onChange={(e) =>
+                      setManual((m) => ({ ...m, type: e.target.value }))
+                    }
+                  >
+                    {TX_TYPES.map((t) => (
+                      <option key={t} value={t}>
+                        {t}
+                      </option>
+                    ))}
+                  </select>
+                </Field>
+                <Field label="Currency">
+                  <select
+                    className="field"
+                    value={manual.currency}
+                    onChange={(e) =>
+                      setManual((m) => ({ ...m, currency: e.target.value }))
+                    }
+                  >
+                    <option value="AUD">AUD</option>
+                    <option value="USD">USD</option>
+                    <option value="GBP">GBP</option>
+                  </select>
+                </Field>
+                <Field label="Quantity">
+                  <input
+                    className="field"
+                    inputMode="decimal"
+                    value={manual.quantity}
+                    onChange={(e) =>
+                      setManual((m) => ({ ...m, quantity: e.target.value }))
+                    }
+                  />
+                </Field>
+                <Field label="Price">
+                  <input
+                    className="field"
+                    inputMode="decimal"
+                    value={manual.price}
+                    onChange={(e) =>
+                      setManual((m) => ({ ...m, price: e.target.value }))
+                    }
+                  />
+                </Field>
+                <Field label="Notes">
+                  <input
+                    className="field"
+                    value={manual.notes}
+                    onChange={(e) =>
+                      setManual((m) => ({ ...m, notes: e.target.value }))
+                    }
+                  />
+                </Field>
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void onManualSave()}
+                className="mt-5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
+              >
+                Save transaction
+              </button>
+            </Panel>
+          )}
+        </div>
       )}
 
-      {tab === "manual" && (
-        <Panel title="Add trade manually">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <Field label="Portfolio">
-              <select
-                className="field"
-                value={manual.portfolioId || ""}
-                onChange={(e) =>
-                  setManual((m) => ({
-                    ...m,
-                    portfolioId: Number(e.target.value),
-                  }))
-                }
-              >
-                {portfolios.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Broker">
-              <select
-                className="field"
-                value={manual.broker}
-                onChange={(e) =>
-                  setManual((m) => ({ ...m, broker: e.target.value }))
-                }
-              >
-                {BROKERS.map((b) => (
-                  <option key={b.id} value={b.id}>
-                    {b.label}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Date">
-              <input
-                type="date"
-                className="field"
-                value={manual.date}
-                onChange={(e) =>
-                  setManual((m) => ({ ...m, date: e.target.value }))
-                }
-              />
-            </Field>
-            <Field label="Ticker">
-              <input
-                className="field"
-                placeholder="VAS or AAPL"
-                value={manual.ticker}
-                onChange={(e) =>
-                  setManual((m) => ({ ...m, ticker: e.target.value }))
-                }
-              />
-            </Field>
-            <Field label="Exchange">
-              <select
-                className="field"
-                value={manual.exchange}
-                onChange={(e) => {
-                  const exchange = e.target.value;
-                  setManual((m) => ({
-                    ...m,
-                    exchange,
-                    currency:
-                      exchange === "US"
-                        ? "USD"
-                        : exchange === "LSE"
-                          ? "GBP"
-                          : "AUD",
-                  }));
-                }}
-              >
-                <option value="ASX">ASX</option>
-                <option value="US">US</option>
-                <option value="LSE">LSE</option>
-              </select>
-            </Field>
-            <Field label="Type">
-              <select
-                className="field"
-                value={manual.type}
-                onChange={(e) =>
-                  setManual((m) => ({ ...m, type: e.target.value }))
-                }
-              >
-                {TX_TYPES.map((t) => (
-                  <option key={t} value={t}>
-                    {t}
-                  </option>
-                ))}
-              </select>
-            </Field>
-            <Field label="Currency">
-              <select
-                className="field"
-                value={manual.currency}
-                onChange={(e) =>
-                  setManual((m) => ({ ...m, currency: e.target.value }))
-                }
-              >
-                <option value="AUD">AUD</option>
-                <option value="USD">USD</option>
-                <option value="GBP">GBP</option>
-              </select>
-            </Field>
-            <Field label="Quantity">
-              <input
-                className="field"
-                inputMode="decimal"
-                value={manual.quantity}
-                onChange={(e) =>
-                  setManual((m) => ({ ...m, quantity: e.target.value }))
-                }
-              />
-            </Field>
-            <Field label="Price">
-              <input
-                className="field"
-                inputMode="decimal"
-                value={manual.price}
-                onChange={(e) =>
-                  setManual((m) => ({ ...m, price: e.target.value }))
-                }
-              />
-            </Field>
-            <Field label="Notes">
-              <input
-                className="field"
-                value={manual.notes}
-                onChange={(e) =>
-                  setManual((m) => ({ ...m, notes: e.target.value }))
-                }
-              />
-            </Field>
-          </div>
-          <button
-            type="button"
-            disabled={busy}
-            onClick={() => void onManualSave()}
-            className="mt-5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
-          >
-            Save transaction
-          </button>
-        </Panel>
-      )}
-
-      {tab === "portfolios" && (
-        <Panel title="Manage portfolios">
-          <p className="mb-4 text-sm text-gray-400">
-            A portfolio is an ownership book (you, partner, SMSF). Each can
-            include trades from many brokers.
-          </p>
-          <ul className="mb-4 space-y-2 text-sm">
-            {portfolios.map((p) => (
-              <li
-                key={p.id}
-                className="flex items-center justify-between rounded-lg border border-gray-800 px-3 py-2"
-              >
-                <span className="font-medium text-gray-100">{p.name}</span>
-                <span className="text-xs text-gray-500">{p.notes}</span>
-              </li>
-            ))}
-          </ul>
-          <div className="flex flex-wrap gap-2">
-            <input
-              className="field max-w-xs"
-              placeholder="New portfolio name"
-              value={newPortfolioName}
-              onChange={(e) => setNewPortfolioName(e.target.value)}
+      {tab === "tax" && (
+        <div className="space-y-4">
+          <SubNav<"profiles" | "drp">
+            options={[
+              ["profiles", "Tax profiles"],
+              ["drp", "DRP check"],
+            ]}
+            value={taxSub}
+            onChange={setTaxSub}
+          />
+          {taxSub === "profiles" && <TaxSettingsPanel />}
+          {taxSub === "drp" && (
+            <DrpCheckPanel
+              portfolioId={portfolioId === "all" ? undefined : portfolioId}
+              holdings={holdings}
             />
-            <button
-              type="button"
-              disabled={busy || !newPortfolioName.trim()}
-              onClick={() => void onCreatePortfolio()}
-              className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
-            >
-              Create portfolio
-            </button>
-          </div>
-        </Panel>
+          )}
+        </div>
       )}
-
-      {tab === "income" && (
-        <IncomePanel
-          portfolioId={portfolioId === "all" ? undefined : portfolioId}
-          broker={brokerFilter || undefined}
-          source={sourceFilter || undefined}
-        />
-      )}
-
-      {tab === "drp" && (
-        <DrpCheckPanel
-          portfolioId={
-            portfolioId === "all" ? portfolios[0]?.id : portfolioId
-          }
-          holdings={holdings}
-        />
-      )}
-
-      {tab === "tax" && <TaxSettingsPanel />}
 
       {tab === "planner" && <PlannerPanel />}
 
-      {tab === "settings" && <SettingsPanel />}
+      {tab === "settings" && (
+        <div className="space-y-4">
+          <Panel title="Portfolios">
+            <p className="mb-4 text-sm text-gray-400">
+              A portfolio is an ownership book (you, partner, SMSF). Each can
+              include trades from many brokers. Switch the active book with the
+              filter bar above.
+            </p>
+            <ul className="mb-4 space-y-2 text-sm">
+              {portfolios.map((p) => (
+                <li
+                  key={p.id}
+                  className="flex items-center justify-between rounded-lg border border-gray-800 px-3 py-2"
+                >
+                  <span className="font-medium text-gray-100">{p.name}</span>
+                  <span className="text-xs text-gray-500">{p.notes}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="flex flex-wrap gap-2">
+              <input
+                className="field max-w-xs"
+                placeholder="New portfolio name"
+                value={newPortfolioName}
+                onChange={(e) => setNewPortfolioName(e.target.value)}
+              />
+              <button
+                type="button"
+                disabled={busy || !newPortfolioName.trim()}
+                onClick={() => void onCreatePortfolio()}
+                className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
+              >
+                Create portfolio
+              </button>
+            </div>
+          </Panel>
+          <SettingsPanel />
+        </div>
+      )}
 
       <div className="mt-8">
         <Disclaimer compact />
@@ -1477,6 +1492,35 @@ function Stat({
       >
         {value}
       </p>
+    </div>
+  );
+}
+
+function SubNav<T extends string>({
+  options,
+  value,
+  onChange,
+}: {
+  options: Array<[T, string]>;
+  value: T;
+  onChange: (v: T) => void;
+}) {
+  return (
+    <div className="flex flex-wrap gap-1 rounded-xl border border-gray-800 bg-gray-950/50 p-1">
+      {options.map(([id, label]) => (
+        <button
+          key={id}
+          type="button"
+          onClick={() => onChange(id)}
+          className={`rounded-lg px-3 py-1.5 text-sm transition ${
+            value === id
+              ? "bg-gray-800 text-emerald-300"
+              : "text-gray-400 hover:text-gray-200"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
     </div>
   );
 }

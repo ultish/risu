@@ -267,29 +267,8 @@ export async function refreshPrices(opts: { force?: boolean } = {}) {
   };
 }
 
-// ─── Phase 2: income + DRP flags / check ────────────────────────────────────
-
-export type IncomeLine = {
-  financialYear: string;
-  exchange: string;
-  currency: string;
-  amount: number;
-  amountAud: number | null;
-  count: number;
-};
-
-export type IncomeSummary = {
-  byFy: IncomeLine[];
-  fyTotals: Array<{
-    financialYear: string;
-    amountAud: number | null;
-    amountNativeMixed: number;
-    count: number;
-  }>;
-  grandTotalAud: number | null;
-  missingFx: string[];
-  fx?: Record<string, number | null>;
-};
+// ─── Phase 2: DRP flags / check ─────────────────────────────────────────────
+// FY cash-dividend Income UI removed for now; GET /api/income + core helpers remain.
 
 export type HoldingFlag = {
   portfolioId: number;
@@ -330,10 +309,6 @@ export type DrpCheckResult = {
   yahooSource?: "cache" | "yahoo" | "none";
   yahooCacheFresh?: boolean;
 };
-
-export async function fetchIncome(f: Filters = {}) {
-  return json<IncomeSummary>(await fetch(`${BASE}/api/income${qs(f)}`));
-}
 
 export async function fetchHoldingFlags(portfolioId: number) {
   return json<{ portfolioId: number; flags: HoldingFlag[] }>(
@@ -452,6 +427,8 @@ export type PlannerScenarioBody = {
   initialCostBaseAud?: number;
   taxProfile: PlannerTaxProfile;
   cgtRegime: CgtRegime;
+  /** CPI / cost-base indexation p.a. (decimal) for post–2027 */
+  inflationRateAnnual?: number;
   monthlyContributionAud?: number;
   contributionKeyframes?: Array<{ monthIndex: number; monthlyAud: number }>;
   lumpSums?: Array<{ monthIndex: number; amountAud: number }>;

@@ -90,7 +90,7 @@ This repo’s first documented release is **0.1.0** (see CHANGELOG). Subsequent 
 ## Layout (quick)
 
 ```
-apps/web          UI (Planner, holdings, income, settings, …)
+apps/web          UI (Planner, holdings, settings, …)
 apps/api          Hono routes, SQLite, Yahoo gate, static serve
 packages/core     parsers, holdings, tax, planner engine, Yahoo client
 fixtures/csv      sample broker files
