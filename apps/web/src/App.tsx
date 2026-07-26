@@ -1,0 +1,1542 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  type FilterMeta,
+  type Holding,
+  type ImportResult,
+  type Portfolio,
+  type TxRow,
+  type YahooStatus,
+  clearYahooCooldown,
+  createPortfolio,
+  createTransaction,
+  deleteTransactions,
+  fetchFilterMeta,
+  fetchHoldings,
+  fetchPortfolios,
+  fetchTransactions,
+  fetchYahooStatus,
+  importFile,
+  importSharesightPaste,
+  refreshPrices,
+} from "./api";
+import { Disclaimer } from "./Disclaimer";
+import { DrpCheckPanel } from "./DrpCheckPanel";
+import ExportBar from "./ExportBar";
+import { IncomePanel } from "./IncomePanel";
+import PerformanceChart from "./PerformanceChart";
+import { PlannerPanel } from "./PlannerPanel";
+import { SettingsPanel } from "./SettingsPanel";
+import { TaxSettingsPanel } from "./TaxSettingsPanel";
+
+type TxSortKey =
+  | "date"
+  | "ticker"
+  | "exchange"
+  | "type"
+  | "broker"
+  | "source"
+  | "quantity"
+  | "amount";
+
+const PARSERS = [
+  { id: "sharesight", label: "Sharesight file" },
+  { id: "commsec", label: "CommSec CSV" },
+  { id: "pocket", label: "Pocket CSV" },
+  { id: "selfwealth", label: "Selfwealth CSV" },
+  { id: "stake", label: "Stake XLSX/CSV" },
+  { id: "betashares_direct", label: "Betashares Direct" },
+  { id: "generic", label: "Generic CSV" },
+] as const;
+
+const BROKERS = [
+  { id: "stake", label: "Stake" },
+  { id: "commsec", label: "CommSec" },
+  { id: "pocket", label: "Pocket" },
+  { id: "selfwealth", label: "Selfwealth" },
+  { id: "betashares_direct", label: "Betashares Direct" },
+  { id: "other", label: "Other" },
+] as const;
+
+const TX_TYPES = [
+  "buy",
+  "sell",
+  "drp",
+  "dividend_cash",
+  "transfer_in",
+  "transfer_out",
+  "fee",
+  "other",
+] as const;
+
+function money(n: number | null | undefined, currency = "AUD") {
+  if (n == null || Number.isNaN(n)) return "—";
+  try {
+    return n.toLocaleString("en-AU", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: 2,
+    });
+  } catch {
+    return `${currency} ${n.toFixed(2)}`;
+  }
+}
+
+function qty(n: number) {
+  return n.toLocaleString("en-AU", { maximumFractionDigits: 6 });
+}
+
+export default function App() {
+  const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
+  const [portfolioId, setPortfolioId] = useState<number | "all">("all");
+  const [brokerFilter, setBrokerFilter] = useState<string>("");
+  const [sourceFilter, setSourceFilter] = useState<string>("");
+  const [tickerFilter, setTickerFilter] = useState<string>("");
+  const [exchangeFilter, setExchangeFilter] = useState<string>("");
+  const [filterMeta, setFilterMeta] = useState<FilterMeta | null>(null);
+
+  const [txSort, setTxSort] = useState<{ key: TxSortKey; dir: "asc" | "desc" }>({
+    key: "date",
+    dir: "desc",
+  });
+  const [selectedTxIds, setSelectedTxIds] = useState<Set<number>>(new Set());
+  const [txScrollTop, setTxScrollTop] = useState(0);
+
+  const [holdings, setHoldings] = useState<Holding[]>([]);
+  const [totals, setTotals] = useState<{
+    costBaseAud: number;
+    marketValueAud: number | null;
+    unrealisedAud: number | null;
+  }>({ costBaseAud: 0, marketValueAud: null, unrealisedAud: null });
+  const [fx, setFx] = useState<Record<string, number | null>>({});
+  const [txs, setTxs] = useState<TxRow[]>([]);
+
+  const [parser, setParser] = useState("commsec");
+  const [importBroker, setImportBroker] = useState("commsec");
+  const [file, setFile] = useState<File | null>(null);
+  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [yahooStatus, setYahooStatus] = useState<YahooStatus | null>(null);
+  const [tab, setTab] = useState<
+    | "holdings"
+    | "transactions"
+    | "import"
+    | "paste"
+    | "manual"
+    | "portfolios"
+    | "income"
+    | "drp"
+    | "tax"
+    | "planner"
+    | "settings"
+  >("holdings");
+
+  const [newPortfolioName, setNewPortfolioName] = useState("");
+
+  const [paste, setPaste] = useState({
+    portfolioId: 0,
+    broker: "stake",
+    ticker: "TSLA",
+    exchange: "US",
+    text: "",
+  });
+  const [pasteResult, setPasteResult] = useState<{
+    parsed: number;
+    imported: number;
+    duplicatesSkipped: number;
+  } | null>(null);
+
+  const [manual, setManual] = useState({
+    portfolioId: 0,
+    broker: "commsec",
+    date: new Date().toISOString().slice(0, 10),
+    ticker: "",
+    exchange: "ASX",
+    type: "buy",
+    quantity: "",
+    price: "",
+    currency: "AUD",
+    notes: "",
+  });
+
+  const filters = useMemo(
+    () => ({
+      portfolioId: portfolioId === "all" ? undefined : portfolioId,
+      broker: brokerFilter || undefined,
+      source: sourceFilter || undefined,
+      ticker: tickerFilter || undefined,
+      exchange: exchangeFilter || undefined,
+    }),
+    [portfolioId, brokerFilter, sourceFilter, tickerFilter, exchangeFilter],
+  );
+
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      // Holdings/ledger only — never triggers Yahoo. Prices come from quote_cache.
+      const [ports, meta, h, t, y] = await Promise.all([
+        fetchPortfolios(),
+        fetchFilterMeta(),
+        fetchHoldings(filters),
+        fetchTransactions(filters),
+        fetchYahooStatus().catch(() => null),
+      ]);
+      setPortfolios(ports);
+      setFilterMeta(meta);
+      setHoldings(h.holdings);
+      setTotals({
+        costBaseAud: h.totals.costBaseAud ?? h.totals.costBase,
+        marketValueAud: h.totals.marketValueAud ?? h.totals.marketValue,
+        unrealisedAud: h.totals.unrealisedAud ?? h.totals.unrealised,
+      });
+      setFx(h.fx ?? {});
+      setTxs(t);
+      setSelectedTxIds(new Set());
+      if (y) setYahooStatus(y);
+
+      if (ports[0]) {
+        setPaste((p) =>
+          p.portfolioId === 0 ? { ...p, portfolioId: ports[0]!.id } : p,
+        );
+        setManual((m) =>
+          m.portfolioId === 0 ? { ...m, portfolioId: ports[0]!.id } : m,
+        );
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, [filters]);
+
+  // Tick cool-down countdown in the UI without calling Yahoo
+  useEffect(() => {
+    if (!yahooStatus || yahooStatus.waitSeconds <= 0) return;
+    const id = window.setInterval(() => {
+      setYahooStatus((prev) => {
+        if (!prev?.blockedUntil) return prev;
+        const wait = Math.max(
+          0,
+          Math.ceil((prev.blockedUntil - Date.now()) / 1000),
+        );
+        if (wait <= 0) {
+          void fetchYahooStatus()
+            .then(setYahooStatus)
+            .catch(() => undefined);
+          return {
+            ...prev,
+            waitSeconds: 0,
+            state: "ok",
+            blockedUntil: null,
+            label: "Yahoo ready",
+          };
+        }
+        return {
+          ...prev,
+          waitSeconds: wait,
+          state: "cooling",
+          label: `Yahoo cool-down · ${formatYahooWait(wait)}`,
+        };
+      });
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [yahooStatus?.blockedUntil, yahooStatus?.waitSeconds]);
+
+  const sortedTxs = useMemo(() => {
+    const list = [...txs];
+    const { key, dir } = txSort;
+    const mul = dir === "asc" ? 1 : -1;
+    list.sort((a, b) => {
+      const av = sortValue(a, key);
+      const bv = sortValue(b, key);
+      if (av < bv) return -1 * mul;
+      if (av > bv) return 1 * mul;
+      return (b.id - a.id) * mul;
+    });
+    return list;
+  }, [txs, txSort]);
+
+  const TX_ROW_H = 40;
+  const TX_VIEW_H = 480;
+  const txVirtual = useMemo(() => {
+    const total = sortedTxs.length;
+    const visible = Math.ceil(TX_VIEW_H / TX_ROW_H) + 6;
+    const start = Math.max(0, Math.floor(txScrollTop / TX_ROW_H) - 2);
+    const end = Math.min(total, start + visible);
+    return {
+      start,
+      end,
+      total,
+      padTop: start * TX_ROW_H,
+      padBottom: Math.max(0, (total - end) * TX_ROW_H),
+      rows: sortedTxs.slice(start, end),
+    };
+  }, [sortedTxs, txScrollTop]);
+
+  function toggleTxSort(key: TxSortKey) {
+    setTxSort((s) =>
+      s.key === key
+        ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: key === "date" ? "desc" : "asc" },
+    );
+  }
+
+  function openHoldingTrades(h: Holding) {
+    setTickerFilter(h.ticker);
+    setExchangeFilter(h.exchange);
+    setTab("transactions");
+    setTxScrollTop(0);
+  }
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const selectedPortfolioLabel = useMemo(() => {
+    if (portfolioId === "all") return "All portfolios";
+    return portfolios.find((p) => p.id === portfolioId)?.name ?? "Portfolio";
+  }, [portfolioId, portfolios]);
+
+  async function onCreatePortfolio() {
+    if (!newPortfolioName.trim()) return;
+    setBusy(true);
+    try {
+      await createPortfolio(newPortfolioName.trim());
+      setNewPortfolioName("");
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onImport() {
+    if (!file) {
+      setError("Choose a CSV or XLSX file");
+      return;
+    }
+    if (portfolioId === "all") {
+      setError("Select a portfolio to import into");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await importFile({
+        file,
+        portfolioId,
+        parser,
+        broker: importBroker,
+      });
+      setImportResult(result);
+      setFile(null);
+      await load();
+      setTab("transactions");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onRefreshPrices() {
+    const cooling =
+      yahooStatus?.state === "cooling" && (yahooStatus.waitSeconds ?? 0) > 0;
+    if (cooling) {
+      const ok = window.confirm(
+        `Yahoo is in cool-down (${formatYahooWait(yahooStatus!.waitSeconds)} left).\n\n` +
+          `Yahoo rarely tells us an exact wait — this timer is from the last rate-limit response (Retry-After if present, otherwise 15m→1h→3h→6h).\n\n` +
+          `Force refresh anyway? This often makes the ban longer.`,
+      );
+      if (!ok) return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const r = await refreshPrices({ force: cooling });
+      if (r.yahoo) setYahooStatus(r.yahoo);
+      else {
+        const y = await fetchYahooStatus().catch(() => null);
+        if (y) setYahooStatus(y);
+      }
+      const failed = r.results.filter((x) => x.error);
+      if (r.yahooCircuitOpen || failed.length) {
+        setError(
+          r.note ||
+            `Some prices failed: ${failed
+              .slice(0, 3)
+              .map((f) => `${f.ticker}(${f.exchange})`)
+              .join(", ")}`,
+        );
+      }
+      await load();
+    } catch (e) {
+      const ye = e as Error & { yahoo?: YahooStatus };
+      if (ye.yahoo) setYahooStatus(ye.yahoo);
+      else {
+        const y = await fetchYahooStatus().catch(() => null);
+        if (y) setYahooStatus(y);
+      }
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onClearYahooCooldown() {
+    try {
+      const y = await clearYahooCooldown();
+      setYahooStatus(y);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  async function onManualSave() {
+    if (!manual.portfolioId || !manual.ticker || !manual.date) {
+      setError("Portfolio, ticker and date are required");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const quantity = Number(manual.quantity) || 0;
+      const price = manual.price === "" ? null : Number(manual.price);
+      await createTransaction({
+        portfolioId: manual.portfolioId,
+        date: manual.date,
+        ticker: manual.ticker.trim().toUpperCase(),
+        exchange: manual.exchange,
+        type: manual.type,
+        quantity,
+        price,
+        amount: price != null && quantity ? price * quantity : null,
+        currency: manual.currency,
+        notes: manual.notes || null,
+        broker: manual.broker,
+        source: "manual",
+      });
+      setManual((m) => ({
+        ...m,
+        ticker: "",
+        quantity: "",
+        price: "",
+        notes: "",
+      }));
+      await load();
+      setTab("transactions");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onPasteImport() {
+    if (!paste.text.trim() || !paste.ticker.trim() || !paste.portfolioId) {
+      setError("Portfolio, ticker, and pasted text are required");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      const result = await importSharesightPaste({
+        portfolioId: paste.portfolioId,
+        ticker: paste.ticker.trim(),
+        exchange: paste.exchange,
+        text: paste.text,
+        broker: paste.broker,
+        source: "sharesight_paste",
+      });
+      setPasteResult(result);
+      setPaste((p) => ({ ...p, text: "" }));
+      await load();
+      setTab("transactions");
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onDeleteSelected() {
+    const ids = [...selectedTxIds];
+    if (!ids.length) return;
+    if (!confirm(`Delete ${ids.length} transaction(s)?`)) return;
+    setBusy(true);
+    try {
+      await deleteTransactions(ids);
+      setSelectedTxIds(new Set());
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleSelectTx(id: number) {
+    setSelectedTxIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllVisible() {
+    const ids = sortedTxs.map((t) => t.id);
+    const allOn = ids.length > 0 && ids.every((id) => selectedTxIds.has(id));
+    setSelectedTxIds(allOn ? new Set() : new Set(ids));
+  }
+
+  const brokerOptions = useMemo(() => {
+    const fromData = filterMeta?.brokers ?? [];
+    const known = BROKERS.map((b) => b.id);
+    return Array.from(new Set([...known, ...fromData]));
+  }, [filterMeta]);
+
+  const sourceOptions = useMemo(() => {
+    return filterMeta?.sources ?? [];
+  }, [filterMeta]);
+
+  return (
+    <div className="mx-auto min-h-screen max-w-6xl px-4 py-8">
+      <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <p className="text-sm tracking-wide text-emerald-400/90">YIELDS</p>
+          <h1 className="text-3xl font-semibold tracking-tight">
+            Portfolio tracker
+          </h1>
+          <p className="mt-1 max-w-xl text-sm text-gray-400">
+            Portfolios (you / partner) can mix brokers. Filter by portfolio,
+            broker, or import source.
+          </p>
+        </div>
+        <div className="flex flex-col items-stretch gap-2 sm:items-end">
+          <YahooStatusBadge
+            status={yahooStatus}
+            busy={busy}
+            onRefresh={() => void onRefreshPrices()}
+            onClearCooldown={() => void onClearYahooCooldown()}
+          />
+          <p className="max-w-xs text-right text-[11px] text-gray-500">
+            Page load never calls Yahoo — only this button (or force DRP).
+          </p>
+        </div>
+      </header>
+
+      {/* Filters */}
+      <div className="mb-6 flex flex-wrap items-end gap-3 rounded-xl border border-gray-800 bg-gray-900/50 p-3">
+        <label className="text-sm">
+          <span className="mb-1 block text-xs text-gray-500">Portfolio</span>
+          <select
+            className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm"
+            value={portfolioId === "all" ? "all" : String(portfolioId)}
+            onChange={(e) => {
+              const v = e.target.value;
+              setPortfolioId(v === "all" ? "all" : Number(v));
+            }}
+          >
+            <option value="all">All portfolios</option>
+            {portfolios.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block text-xs text-gray-500">Broker</span>
+          <select
+            className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm"
+            value={brokerFilter}
+            onChange={(e) => setBrokerFilter(e.target.value)}
+          >
+            <option value="">All brokers</option>
+            {brokerOptions.map((b) => (
+              <option key={b} value={b}>
+                {b}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block text-xs text-gray-500">Source</span>
+          <select
+            className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm"
+            value={sourceFilter}
+            onChange={(e) => setSourceFilter(e.target.value)}
+          >
+            <option value="">All sources</option>
+            {sourceOptions.map((s) => (
+              <option key={s} value={s}>
+                {s}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm">
+          <span className="mb-1 block text-xs text-gray-500">Ticker</span>
+          <input
+            className="w-28 rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm uppercase"
+            placeholder="All"
+            value={tickerFilter}
+            onChange={(e) => setTickerFilter(e.target.value.toUpperCase())}
+          />
+        </label>
+        {(brokerFilter ||
+          sourceFilter ||
+          portfolioId !== "all" ||
+          tickerFilter ||
+          exchangeFilter) && (
+          <button
+            type="button"
+            className="text-xs text-gray-400 underline hover:text-gray-200"
+            onClick={() => {
+              setPortfolioId("all");
+              setBrokerFilter("");
+              setSourceFilter("");
+              setTickerFilter("");
+              setExchangeFilter("");
+            }}
+          >
+            Clear filters
+          </button>
+        )}
+        <div className="ml-auto">
+          <ExportBar filters={filters} />
+        </div>
+      </div>
+
+      <div className="mb-6 grid gap-3 sm:grid-cols-3">
+        <Stat label="Cost base (AUD)" value={money(totals.costBaseAud)} />
+        <Stat label="Market value (AUD)" value={money(totals.marketValueAud)} />
+        <Stat
+          label="Unrealised (AUD)"
+          value={money(totals.unrealisedAud)}
+          accent={
+            totals.unrealisedAud == null
+              ? undefined
+              : totals.unrealisedAud >= 0
+                ? "up"
+                : "down"
+          }
+        />
+      </div>
+
+      {fx["AUDUSD=X"] != null && (
+        <p className="mb-4 text-xs text-gray-500">
+          FX AUDUSD=X {fx["AUDUSD=X"].toFixed(4)} (USD per 1 AUD)
+        </p>
+      )}
+
+      <nav className="mb-4 flex flex-wrap gap-1 rounded-xl border border-gray-800 bg-gray-900/60 p-1">
+        {(
+          [
+            ["holdings", "Holdings"],
+            ["transactions", "Transactions"],
+            ["income", "Income"],
+            ["drp", "DRP check"],
+            ["paste", "Paste Sharesight"],
+            ["import", "Import file"],
+            ["manual", "Add trade"],
+            ["portfolios", "Portfolios"],
+            ["tax", "Tax"],
+            ["planner", "Planner"],
+            ["settings", "Settings"],
+          ] as const
+        ).map(([id, label]) => (
+          <button
+            key={id}
+            type="button"
+            onClick={() => setTab(id)}
+            className={`flex-1 rounded-lg px-2 py-2 text-xs sm:text-sm transition ${
+              tab === id
+                ? "bg-emerald-500/15 text-emerald-300"
+                : "text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </nav>
+
+      {error && (
+        <div className="mb-4 rounded-lg border border-red-900/50 bg-red-950/40 px-4 py-3 text-sm text-red-200">
+          {error}
+        </div>
+      )}
+
+      {tab === "holdings" && (
+        <div className="space-y-4">
+          <Panel title={`Holdings · ${selectedPortfolioLabel}`}>
+            <p className="mb-3 text-xs text-gray-500">
+              Click a row to open that ticker’s transactions.
+            </p>
+            {holdings.length === 0 ? (
+              <Empty hint="Import or paste trades into a portfolio." />
+            ) : (
+              <div className="max-h-[520px] overflow-auto rounded-lg border border-gray-800">
+                <table className="w-full min-w-[800px] text-left text-sm">
+                  <thead className="sticky top-0 z-10 bg-gray-900 text-xs uppercase tracking-wide text-gray-500 shadow">
+                    <tr>
+                      <th className="px-3 py-2.5 font-medium">Ticker</th>
+                      <th className="px-3 py-2.5 font-medium">Mkt</th>
+                      <th className="px-3 py-2.5 font-medium">Units</th>
+                      <th className="px-3 py-2.5 font-medium">Avg cost</th>
+                      <th className="px-3 py-2.5 font-medium">Price</th>
+                      <th className="px-3 py-2.5 font-medium">Value</th>
+                      <th className="px-3 py-2.5 font-medium">Value AUD</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {holdings.map((h) => (
+                      <tr
+                        key={`${h.exchange}:${h.ticker}`}
+                        className="cursor-pointer border-t border-gray-800/80 hover:bg-emerald-500/10"
+                        onClick={() => openHoldingTrades(h)}
+                      >
+                        <td className="px-3 py-2.5 font-medium text-emerald-300">
+                          {h.ticker}
+                        </td>
+                        <td className="px-3 py-2.5">
+                          <ExchangeBadge
+                            exchange={h.exchange}
+                            currency={h.currency}
+                          />
+                        </td>
+                        <td className="px-3 py-2.5 tabular-nums">
+                          {qty(h.quantity)}
+                        </td>
+                        <td className="px-3 py-2.5 tabular-nums">
+                          {money(h.avgCost, h.currency)}
+                        </td>
+                        <td className="px-3 py-2.5 tabular-nums">
+                          {money(h.marketPrice, h.currency)}
+                        </td>
+                        <td className="px-3 py-2.5 tabular-nums">
+                          {money(h.marketValue, h.currency)}
+                        </td>
+                        <td className="px-3 py-2.5 tabular-nums">
+                          {money(h.marketValueAud)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+          <PerformanceChart filters={filters} />
+        </div>
+      )}
+
+      {tab === "transactions" && (
+        <Panel
+          title={
+            tickerFilter
+              ? `Ledger · ${tickerFilter}${exchangeFilter ? ` (${exchangeFilter})` : ""}`
+              : `Ledger · ${selectedPortfolioLabel}`
+          }
+        >
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            {tickerFilter && (
+              <button
+                type="button"
+                className="rounded-md bg-emerald-500/15 px-2 py-1 text-xs text-emerald-300"
+                onClick={() => {
+                  setTickerFilter("");
+                  setExchangeFilter("");
+                }}
+              >
+                Clear ticker filter ×
+              </button>
+            )}
+            <span className="text-xs text-gray-500">
+              {sortedTxs.length} row{sortedTxs.length === 1 ? "" : "s"}
+              {selectedTxIds.size > 0
+                ? ` · ${selectedTxIds.size} selected`
+                : ""}
+            </span>
+            <div className="flex-1" />
+            <button
+              type="button"
+              disabled={busy || selectedTxIds.size === 0}
+              onClick={() => void onDeleteSelected()}
+              className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-1.5 text-xs text-red-200 hover:bg-red-900/40 disabled:opacity-40"
+            >
+              Delete selected
+            </button>
+          </div>
+
+          {sortedTxs.length === 0 ? (
+            <Empty hint="No transactions for current filters." />
+          ) : (
+            <div
+              className="overflow-auto rounded-lg border border-gray-800"
+              style={{ height: TX_VIEW_H }}
+              onScroll={(e) => setTxScrollTop(e.currentTarget.scrollTop)}
+            >
+              <table className="w-full min-w-[1000px] table-fixed text-left text-sm">
+                <thead className="sticky top-0 z-10 bg-gray-900 text-xs uppercase tracking-wide text-gray-500 shadow">
+                  <tr>
+                    <th className="w-10 px-2 py-2.5">
+                      <input
+                        type="checkbox"
+                        checked={
+                          sortedTxs.length > 0 &&
+                          sortedTxs.every((t) => selectedTxIds.has(t.id))
+                        }
+                        onChange={toggleSelectAllVisible}
+                        aria-label="Select all"
+                      />
+                    </th>
+                    <SortTh
+                      label="Date"
+                      active={txSort.key === "date"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("date")}
+                    />
+                    <SortTh
+                      label="Ticker"
+                      active={txSort.key === "ticker"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("ticker")}
+                    />
+                    <SortTh
+                      label="Mkt"
+                      active={txSort.key === "exchange"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("exchange")}
+                    />
+                    <SortTh
+                      label="Type"
+                      active={txSort.key === "type"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("type")}
+                    />
+                    <SortTh
+                      label="Broker"
+                      active={txSort.key === "broker"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("broker")}
+                    />
+                    <SortTh
+                      label="Source"
+                      active={txSort.key === "source"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("source")}
+                    />
+                    <SortTh
+                      label="Qty"
+                      active={txSort.key === "quantity"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("quantity")}
+                    />
+                    <SortTh
+                      label="Amount"
+                      active={txSort.key === "amount"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("amount")}
+                    />
+                  </tr>
+                </thead>
+                <tbody>
+                  {txVirtual.padTop > 0 && (
+                    <tr aria-hidden>
+                      <td
+                        colSpan={9}
+                        style={{ height: txVirtual.padTop, padding: 0 }}
+                      />
+                    </tr>
+                  )}
+                  {txVirtual.rows.map((t) => (
+                    <tr
+                      key={t.id}
+                      className={`border-t border-gray-800/80 ${
+                        selectedTxIds.has(t.id) ? "bg-sky-500/10" : ""
+                      }`}
+                      style={{ height: TX_ROW_H }}
+                    >
+                      <td className="px-2 py-1">
+                        <input
+                          type="checkbox"
+                          checked={selectedTxIds.has(t.id)}
+                          onChange={() => toggleSelectTx(t.id)}
+                          aria-label={`Select ${t.id}`}
+                        />
+                      </td>
+                      <td className="px-2 py-1 tabular-nums text-gray-300">
+                        {t.date}
+                      </td>
+                      <td className="px-2 py-1 font-medium">{t.ticker}</td>
+                      <td className="px-2 py-1">
+                        <ExchangeBadge
+                          exchange={t.exchange}
+                          currency={t.currency}
+                        />
+                      </td>
+                      <td className="px-2 py-1">
+                        <TypeBadge type={t.type} />
+                      </td>
+                      <td className="px-2 py-1 text-xs text-gray-400">
+                        {t.broker || t.custody || "—"}
+                      </td>
+                      <td className="max-w-[100px] truncate px-2 py-1 text-xs text-gray-500">
+                        {t.source || "—"}
+                      </td>
+                      <td className="px-2 py-1 tabular-nums">
+                        {qty(t.quantity)}
+                      </td>
+                      <td className="px-2 py-1 tabular-nums">
+                        {money(t.amount, t.currency)}
+                      </td>
+                    </tr>
+                  ))}
+                  {txVirtual.padBottom > 0 && (
+                    <tr aria-hidden>
+                      <td
+                        colSpan={9}
+                        style={{ height: txVirtual.padBottom, padding: 0 }}
+                      />
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {tab === "paste" && (
+        <Panel title="Paste Sharesight holding trades">
+          <p className="mb-4 text-sm text-gray-400">
+            <strong className="text-gray-200">Portfolio</strong> = whose book
+            (you / partner). <strong className="text-gray-200">Broker</strong> =
+            where it is held (Stake, CommSec…). Source is recorded as{" "}
+            <code className="text-gray-300">sharesight_paste</code>.
+          </p>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="Portfolio">
+              <select
+                className="field"
+                value={paste.portfolioId || ""}
+                onChange={(e) =>
+                  setPaste((p) => ({
+                    ...p,
+                    portfolioId: Number(e.target.value),
+                  }))
+                }
+              >
+                {portfolios.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Broker (held at)">
+              <select
+                className="field"
+                value={paste.broker}
+                onChange={(e) =>
+                  setPaste((p) => ({ ...p, broker: e.target.value }))
+                }
+              >
+                {BROKERS.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Ticker">
+              <input
+                className="field"
+                value={paste.ticker}
+                onChange={(e) =>
+                  setPaste((p) => ({ ...p, ticker: e.target.value }))
+                }
+                placeholder="TSLA"
+              />
+            </Field>
+            <Field label="Exchange">
+              <select
+                className="field"
+                value={paste.exchange}
+                onChange={(e) =>
+                  setPaste((p) => ({ ...p, exchange: e.target.value }))
+                }
+              >
+                <option value="US">US</option>
+                <option value="ASX">ASX</option>
+                <option value="LSE">LSE</option>
+              </select>
+            </Field>
+          </div>
+          <Field label="Paste trades">
+            <textarea
+              className="field mt-1 min-h-[220px] font-mono text-xs"
+              placeholder={`10 Jun 2025\nBuy\n1.00889087\nUS$312.68\n...`}
+              value={paste.text}
+              onChange={(e) =>
+                setPaste((p) => ({ ...p, text: e.target.value }))
+              }
+            />
+          </Field>
+          <button
+            type="button"
+            disabled={busy || !paste.text.trim()}
+            onClick={() => void onPasteImport()}
+            className="mt-4 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
+          >
+            {busy ? "Importing…" : "Import paste"}
+          </button>
+          {pasteResult && (
+            <p className="mt-3 text-sm text-emerald-300">
+              Parsed {pasteResult.parsed}, imported {pasteResult.imported},
+              duplicates skipped {pasteResult.duplicatesSkipped}
+            </p>
+          )}
+        </Panel>
+      )}
+
+      {tab === "import" && (
+        <Panel title="Import broker / Sharesight file">
+          <p className="mb-4 text-sm text-gray-400">
+            File goes into a <strong className="text-gray-200">portfolio</strong>
+            . Set <strong className="text-gray-200">broker</strong> to custody
+            (Stake etc.). Parser only decides how to read the file.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <label className="block text-sm">
+              <span className="mb-1 block text-gray-400">Portfolio</span>
+              <select
+                className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
+                value={portfolioId === "all" ? "" : String(portfolioId)}
+                onChange={(e) => setPortfolioId(Number(e.target.value))}
+              >
+                <option value="" disabled>
+                  Select portfolio…
+                </option>
+                {portfolios.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block text-gray-400">File parser</span>
+              <select
+                className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
+                value={parser}
+                onChange={(e) => setParser(e.target.value)}
+              >
+                {PARSERS.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="block text-sm">
+              <span className="mb-1 block text-gray-400">Broker (custody)</span>
+              <select
+                className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
+                value={importBroker}
+                onChange={(e) => setImportBroker(e.target.value)}
+              >
+                {BROKERS.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <label className="mt-4 block text-sm">
+            <span className="mb-1 block text-gray-400">CSV or XLSX</span>
+            <input
+              type="file"
+              accept=".csv,.xlsx,.xls,text/csv"
+              className="block w-full text-sm text-gray-300 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-500/20 file:px-3 file:py-2 file:text-emerald-200"
+              onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+            />
+          </label>
+          <button
+            type="button"
+            disabled={busy || !file}
+            onClick={() => void onImport()}
+            className="mt-5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
+          >
+            {busy ? "Importing…" : "Import"}
+          </button>
+          {importResult && (
+            <p className="mt-3 text-sm text-emerald-300">
+              Imported {importResult.imported} / {importResult.parsed} · source{" "}
+              {importResult.source} · broker {importResult.broker}
+            </p>
+          )}
+        </Panel>
+      )}
+
+      {tab === "manual" && (
+        <Panel title="Add trade manually">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <Field label="Portfolio">
+              <select
+                className="field"
+                value={manual.portfolioId || ""}
+                onChange={(e) =>
+                  setManual((m) => ({
+                    ...m,
+                    portfolioId: Number(e.target.value),
+                  }))
+                }
+              >
+                {portfolios.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Broker">
+              <select
+                className="field"
+                value={manual.broker}
+                onChange={(e) =>
+                  setManual((m) => ({ ...m, broker: e.target.value }))
+                }
+              >
+                {BROKERS.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.label}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Date">
+              <input
+                type="date"
+                className="field"
+                value={manual.date}
+                onChange={(e) =>
+                  setManual((m) => ({ ...m, date: e.target.value }))
+                }
+              />
+            </Field>
+            <Field label="Ticker">
+              <input
+                className="field"
+                placeholder="VAS or AAPL"
+                value={manual.ticker}
+                onChange={(e) =>
+                  setManual((m) => ({ ...m, ticker: e.target.value }))
+                }
+              />
+            </Field>
+            <Field label="Exchange">
+              <select
+                className="field"
+                value={manual.exchange}
+                onChange={(e) => {
+                  const exchange = e.target.value;
+                  setManual((m) => ({
+                    ...m,
+                    exchange,
+                    currency:
+                      exchange === "US"
+                        ? "USD"
+                        : exchange === "LSE"
+                          ? "GBP"
+                          : "AUD",
+                  }));
+                }}
+              >
+                <option value="ASX">ASX</option>
+                <option value="US">US</option>
+                <option value="LSE">LSE</option>
+              </select>
+            </Field>
+            <Field label="Type">
+              <select
+                className="field"
+                value={manual.type}
+                onChange={(e) =>
+                  setManual((m) => ({ ...m, type: e.target.value }))
+                }
+              >
+                {TX_TYPES.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Currency">
+              <select
+                className="field"
+                value={manual.currency}
+                onChange={(e) =>
+                  setManual((m) => ({ ...m, currency: e.target.value }))
+                }
+              >
+                <option value="AUD">AUD</option>
+                <option value="USD">USD</option>
+                <option value="GBP">GBP</option>
+              </select>
+            </Field>
+            <Field label="Quantity">
+              <input
+                className="field"
+                inputMode="decimal"
+                value={manual.quantity}
+                onChange={(e) =>
+                  setManual((m) => ({ ...m, quantity: e.target.value }))
+                }
+              />
+            </Field>
+            <Field label="Price">
+              <input
+                className="field"
+                inputMode="decimal"
+                value={manual.price}
+                onChange={(e) =>
+                  setManual((m) => ({ ...m, price: e.target.value }))
+                }
+              />
+            </Field>
+            <Field label="Notes">
+              <input
+                className="field"
+                value={manual.notes}
+                onChange={(e) =>
+                  setManual((m) => ({ ...m, notes: e.target.value }))
+                }
+              />
+            </Field>
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onManualSave()}
+            className="mt-5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
+          >
+            Save transaction
+          </button>
+        </Panel>
+      )}
+
+      {tab === "portfolios" && (
+        <Panel title="Manage portfolios">
+          <p className="mb-4 text-sm text-gray-400">
+            A portfolio is an ownership book (you, partner, SMSF). Each can
+            include trades from many brokers.
+          </p>
+          <ul className="mb-4 space-y-2 text-sm">
+            {portfolios.map((p) => (
+              <li
+                key={p.id}
+                className="flex items-center justify-between rounded-lg border border-gray-800 px-3 py-2"
+              >
+                <span className="font-medium text-gray-100">{p.name}</span>
+                <span className="text-xs text-gray-500">{p.notes}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="flex flex-wrap gap-2">
+            <input
+              className="field max-w-xs"
+              placeholder="New portfolio name"
+              value={newPortfolioName}
+              onChange={(e) => setNewPortfolioName(e.target.value)}
+            />
+            <button
+              type="button"
+              disabled={busy || !newPortfolioName.trim()}
+              onClick={() => void onCreatePortfolio()}
+              className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
+            >
+              Create portfolio
+            </button>
+          </div>
+        </Panel>
+      )}
+
+      {tab === "income" && (
+        <IncomePanel
+          portfolioId={portfolioId === "all" ? undefined : portfolioId}
+          broker={brokerFilter || undefined}
+          source={sourceFilter || undefined}
+        />
+      )}
+
+      {tab === "drp" && (
+        <DrpCheckPanel
+          portfolioId={
+            portfolioId === "all" ? portfolios[0]?.id : portfolioId
+          }
+          holdings={holdings}
+        />
+      )}
+
+      {tab === "tax" && <TaxSettingsPanel />}
+
+      {tab === "planner" && <PlannerPanel />}
+
+      {tab === "settings" && <SettingsPanel />}
+
+      <div className="mt-8">
+        <Disclaimer compact />
+      </div>
+
+      <footer className="mt-4 text-center text-xs text-gray-600">
+        Local-only · SQLite · Yahoo prices · Not financial advice
+      </footer>
+
+      <style>{`
+        .field {
+          width: 100%;
+          border-radius: 0.5rem;
+          border: 1px solid #374151;
+          background: #111827;
+          padding: 0.5rem 0.75rem;
+          font-size: 0.875rem;
+          color: #f3f4f6;
+        }
+      `}</style>
+    </div>
+  );
+}
+
+function formatYahooWait(seconds: number): string {
+  if (seconds <= 0) return "ready";
+  if (seconds < 60) return `${seconds}s`;
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm ? `${h}h ${rm}m` : `${h}h`;
+}
+
+function YahooStatusBadge({
+  status,
+  busy,
+  onRefresh,
+  onClearCooldown,
+}: {
+  status: YahooStatus | null;
+  busy: boolean;
+  onRefresh: () => void;
+  onClearCooldown: () => void;
+}) {
+  const cooling = status?.state === "cooling" && (status.waitSeconds ?? 0) > 0;
+  const badgeClass = cooling
+    ? "border-amber-800/60 bg-amber-950/40 text-amber-100"
+    : "border-emerald-800/50 bg-emerald-950/30 text-emerald-200";
+
+  return (
+    <div className="flex flex-wrap items-center justify-end gap-2">
+      <div
+        className={`rounded-lg border px-2.5 py-1.5 text-xs ${badgeClass}`}
+        title={status?.note ?? "Yahoo status"}
+      >
+        <div className="font-medium">
+          {status?.label ?? "Yahoo status…"}
+        </div>
+        {cooling && status?.lastError && (
+          <div className="mt-0.5 max-w-[220px] truncate text-[10px] text-amber-200/70">
+            {status.lastError}
+          </div>
+        )}
+        {!cooling && status?.lastOkAt && (
+          <div className="mt-0.5 text-[10px] text-emerald-200/60">
+            Last OK {status.lastOkAt.slice(0, 16).replace("T", " ")} UTC
+          </div>
+        )}
+      </div>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={onRefresh}
+        className={`rounded-lg border px-3 py-2 text-sm disabled:opacity-50 ${
+          cooling
+            ? "border-amber-700/50 bg-amber-950/30 text-amber-100 hover:bg-amber-900/40"
+            : "border-gray-600 bg-gray-800 hover:bg-gray-700"
+        }`}
+      >
+        {busy
+          ? "Refreshing…"
+          : cooling
+            ? `Wait ${formatYahooWait(status!.waitSeconds)} (or force)`
+            : "Refresh Yahoo prices + FX"}
+      </button>
+      {cooling && (
+        <button
+          type="button"
+          disabled={busy}
+          onClick={onClearCooldown}
+          className="rounded-lg border border-gray-700 bg-gray-900 px-2 py-2 text-xs text-gray-400 hover:text-gray-200 disabled:opacity-50"
+          title="Clear local cool-down timer only — does not unblock Yahoo’s servers"
+        >
+          Clear timer
+        </button>
+      )}
+    </div>
+  );
+}
+
+function sortValue(t: TxRow, key: TxSortKey): string | number {
+  switch (key) {
+    case "date":
+      return t.date;
+    case "ticker":
+      return t.ticker;
+    case "exchange":
+      return t.exchange;
+    case "type":
+      return t.type;
+    case "broker":
+      return (t.broker || t.custody || "").toLowerCase();
+    case "source":
+      return (t.source || "").toLowerCase();
+    case "quantity":
+      return t.quantity;
+    case "amount":
+      return t.amount ?? 0;
+    default:
+      return t.date;
+  }
+}
+
+function SortTh({
+  label,
+  active,
+  dir,
+  onClick,
+}: {
+  label: string;
+  active: boolean;
+  dir: "asc" | "desc";
+  onClick: () => void;
+}) {
+  return (
+    <th className="px-2 py-2.5 font-medium">
+      <button
+        type="button"
+        onClick={onClick}
+        className={`inline-flex items-center gap-1 hover:text-gray-200 ${
+          active ? "text-emerald-300" : ""
+        }`}
+      >
+        {label}
+        {active ? (dir === "asc" ? " ↑" : " ↓") : ""}
+      </button>
+    </th>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="block text-sm">
+      <span className="mb-1 block text-gray-400">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function Stat({
+  label,
+  value,
+  accent,
+}: {
+  label: string;
+  value: string;
+  accent?: "up" | "down";
+}) {
+  return (
+    <div className="rounded-xl border border-gray-800 bg-gray-900/50 px-4 py-3">
+      <p className="text-xs uppercase tracking-wide text-gray-500">{label}</p>
+      <p
+        className={`mt-1 text-xl font-semibold tabular-nums ${
+          accent === "up"
+            ? "text-emerald-300"
+            : accent === "down"
+              ? "text-red-300"
+              : "text-gray-100"
+        }`}
+      >
+        {value}
+      </p>
+    </div>
+  );
+}
+
+function Panel({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-5 shadow-xl shadow-black/20">
+      <h2 className="mb-4 text-lg font-medium text-gray-100">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+function Empty({ hint }: { hint: string }) {
+  return <p className="text-sm text-gray-500">{hint}</p>;
+}
+
+function ExchangeBadge({
+  exchange,
+  currency,
+}: {
+  exchange: string;
+  currency: string;
+}) {
+  const us = exchange === "US" || currency === "USD";
+  return (
+    <span
+      className={`inline-block rounded-md px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+        us
+          ? "bg-blue-500/15 text-blue-300"
+          : exchange === "ASX"
+            ? "bg-amber-500/15 text-amber-200"
+            : "bg-gray-500/20 text-gray-300"
+      }`}
+    >
+      {exchange}
+    </span>
+  );
+}
+
+function TypeBadge({ type }: { type: string }) {
+  const styles: Record<string, string> = {
+    buy: "bg-sky-500/15 text-sky-300",
+    sell: "bg-orange-500/15 text-orange-300",
+    drp: "bg-emerald-500/15 text-emerald-300",
+    dividend_cash: "bg-violet-500/15 text-violet-300",
+  };
+  return (
+    <span
+      className={`inline-block rounded-md px-2 py-0.5 text-xs font-medium uppercase tracking-wide ${
+        styles[type] ?? "bg-gray-700 text-gray-300"
+      }`}
+    >
+      {type}
+    </span>
+  );
+}

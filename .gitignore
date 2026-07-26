@@ -1,0 +1,15 @@
+node_modules
+dist
+build
+.data
+data/*.db
+data/*.db-*
+.env
+.env.local
+*.log
+.DS_Store
+coverage
+.turbo
+apps/web/dist
+apps/api/dist
+packages/core/dist

@@ -1,0 +1,6 @@
+Trade Date,Instrument Code,Market Code,Transaction Type,Quantity,Price,Brokerage,Value,Currency,Comments
+2020-03-15,VAS,ASX,BUY,50,75.20,10.00,3760.00,AUD,
+2021-06-01,VAS,ASX,DRP,1.85,88.40,0,163.54,AUD,Dividend reinvestment
+2022-01-15,AAPL,NASDAQ,BUY,10,150.00,0,1500.00,USD,
+2023-03-20,AAPL,US,DRIP,0.5,160.00,0,80.00,USD,Reinvest
+2023-02-03,VAS,ASX,SELL,10,90.00,10.00,900.00,AUD,

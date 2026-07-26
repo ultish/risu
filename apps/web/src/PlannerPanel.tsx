@@ -1,0 +1,2576 @@
+/**
+ * PlannerPanel — define ticker portfolios (growth / dividend / hybrid),
+ * tweak assumed yield/growth/MER, run comparison.
+ */
+import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  fetchHoldings,
+  fetchInstrumentAssumptions,
+  fetchPlannerTemplates,
+  fetchTaxProfiles,
+  runPlanner,
+  type AllocationReport,
+  type AssetAssumption,
+  type CgtRegime,
+  type ExitStrategy,
+  type ScenarioAllocation,
+  type ScenarioReport,
+  type TaxProfileDto,
+} from "./api";
+import { Disclaimer } from "./Disclaimer";
+
+function money(n: number | null | undefined) {
+  if (n == null || Number.isNaN(n)) return "—";
+  return n.toLocaleString("en-AU", {
+    style: "currency",
+    currency: "AUD",
+    maximumFractionDigits: 0,
+  });
+}
+
+/** UI stores rates as percent numbers (e.g. 5.5) for easier editing */
+type UiAsset = {
+  ticker: string;
+  weightPct: number;
+  growthPct: number;
+  yieldPct: number;
+  merPct: number;
+  frankingPct: number;
+  reinvest: boolean;
+};
+
+type UiExit = "liquidate" | "hold" | "drawdown";
+
+type UiAllocation = {
+  id: string;
+  label: string;
+  assets: UiAsset[];
+  /** Per-strategy exit — growth often sells, dividend often holds */
+  exitType: UiExit;
+  drawdownPct: number;
+};
+
+/** Contribution change: applies from this point until the next keyframe */
+type UiKeyframe = {
+  id: string;
+  /** 1-based plan year */
+  year: number;
+  /** 1–12; month within year (1 = start of year) */
+  monthInYear: number;
+  monthlyAud: number;
+};
+
+type UiLumpSum = {
+  id: string;
+  year: number;
+  monthInYear: number;
+  amountAud: number;
+};
+
+function newId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+/** Map UI year/month to engine monthIndex (0 = start of Y1). */
+function toMonthIndex(year: number, monthInYear: number): number {
+  const y = Math.max(1, Math.floor(year) || 1);
+  const m = Math.min(12, Math.max(1, Math.floor(monthInYear) || 1));
+  return (y - 1) * 12 + (m - 1);
+}
+
+function formatMoneyMo(n: number) {
+  return n.toLocaleString("en-AU", {
+    style: "currency",
+    currency: "AUD",
+    maximumFractionDigits: 0,
+  });
+}
+
+/**
+ * Short schedule preview, e.g. “Y1–Y3: $1,000/mo · Y4+: $1,500/mo”
+ * First period uses flat monthly from month 0; keyframes override from their monthIndex.
+ */
+function contributionSchedulePreview(
+  flatMonthly: number,
+  keyframes: UiKeyframe[],
+  horizonYears: number,
+): string {
+  const totalMonths = Math.max(1, horizonYears) * 12;
+  const events = [...keyframes]
+    .map((k) => ({
+      monthIndex: toMonthIndex(k.year, k.monthInYear),
+      monthlyAud: Math.max(0, Number(k.monthlyAud) || 0),
+    }))
+    .filter((k) => k.monthIndex >= 0 && k.monthIndex < totalMonths)
+    .sort((a, b) => a.monthIndex - b.monthIndex);
+
+  type Seg = { start: number; amount: number };
+  const segs: Seg[] = [{ start: 0, amount: Math.max(0, flatMonthly) }];
+  for (const e of events) {
+    const last = segs[segs.length - 1]!;
+    if (e.monthIndex === last.start) {
+      last.amount = e.monthlyAud;
+    } else if (e.monthlyAud !== last.amount) {
+      segs.push({ start: e.monthIndex, amount: e.monthlyAud });
+    }
+  }
+
+  function labelRange(startMonth: number, endMonthExclusive: number): string {
+    const startY = Math.floor(startMonth / 12) + 1;
+    const startM = (startMonth % 12) + 1;
+    const lastMonth = endMonthExclusive - 1;
+    const endY = Math.floor(lastMonth / 12) + 1;
+    const endM = (lastMonth % 12) + 1;
+    const openEnded = endMonthExclusive >= totalMonths;
+
+    const startLabel =
+      startM === 1 ? `Y${startY}` : `Y${startY} M${startM}`;
+    if (openEnded) {
+      if (startMonth === 0 && segs.length === 1) return `Y1–Y${horizonYears}`;
+      return `${startLabel}+`;
+    }
+    const endLabel = endM === 12 ? `Y${endY}` : `Y${endY} M${endM}`;
+    if (startLabel === endLabel) return startLabel;
+    // Whole-year span: Y1–Y3
+    if (startM === 1 && endM === 12) return `Y${startY}–Y${endY}`;
+    return `${startLabel}–${endLabel}`;
+  }
+
+  return segs
+    .map((s, i) => {
+      const end =
+        i + 1 < segs.length ? segs[i + 1]!.start : totalMonths;
+      return `${labelRange(s.start, end)}: ${formatMoneyMo(s.amount)}/mo`;
+    })
+    .join(" · ");
+}
+
+function fromApiAllocation(a: ScenarioAllocation): UiAllocation {
+  const exit = a.exit ?? { type: "liquidate" as const };
+  return {
+    id: a.id,
+    label: a.label,
+    exitType: exit.type,
+    drawdownPct:
+      exit.type === "drawdown" ? round1((exit.annualRate || 0.04) * 100) : 4,
+    assets: a.assets.map((x) => ({
+      ticker: (x.ticker || x.label || "").toUpperCase(),
+      weightPct: round1((x.weight || 0) * 100),
+      growthPct: round2((x.growthRate || 0) * 100),
+      yieldPct: round2((x.yieldRate || 0) * 100),
+      merPct: round3((x.mer || 0) * 100),
+      frankingPct: x.frankingPercent ?? 0,
+      reinvest: x.reinvestDividends !== false,
+    })),
+  };
+}
+
+function toApiAllocation(a: UiAllocation): ScenarioAllocation {
+  const assets: AssetAssumption[] = a.assets
+    .filter((x) => x.ticker.trim())
+    .map((x) => ({
+      ticker: x.ticker.trim().toUpperCase(),
+      label: x.ticker.trim().toUpperCase(),
+      weight: Math.max(0, x.weightPct) / 100,
+      growthRate: x.growthPct / 100,
+      yieldRate: x.yieldPct / 100,
+      mer: x.merPct / 100,
+      frankingPercent: x.frankingPct,
+      reinvestDividends: x.reinvest,
+    }));
+  // Renormalise weights if they don't sum to 1
+  const sum = assets.reduce((s, x) => s + x.weight, 0);
+  if (sum > 0 && Math.abs(sum - 1) > 0.001) {
+    for (const x of assets) x.weight = x.weight / sum;
+  }
+  const exit: ExitStrategy =
+    a.exitType === "drawdown"
+      ? { type: "drawdown", annualRate: a.drawdownPct / 100 }
+      : { type: a.exitType };
+  return { id: a.id, label: a.label, assets, exit };
+}
+
+function emptyRow(): UiAsset {
+  return {
+    ticker: "",
+    weightPct: 10,
+    growthPct: 6,
+    yieldPct: 3,
+    merPct: 0.2,
+    frankingPct: 0,
+    reinvest: true,
+  };
+}
+
+function round1(n: number) {
+  return Math.round(n * 10) / 10;
+}
+function round2(n: number) {
+  return Math.round(n * 100) / 100;
+}
+function round3(n: number) {
+  return Math.round(n * 1000) / 1000;
+}
+
+/** Browser localStorage key — planner draft (inputs only, not results). */
+const PLANNER_LS_KEY = "yields.planner.draft.v1";
+const SWITCH_LS_KEY = "yields.planner.switch.v1";
+
+type PlannerDraft = {
+  v: 1;
+  profileId: number | null;
+  horizonYears: number;
+  monthlyContribution: number;
+  initialValue: number;
+  cgtRegime: CgtRegime;
+  compareOldCgt: boolean;
+  showContributionPath: boolean;
+  keyframes: UiKeyframe[];
+  lumpSums: UiLumpSum[];
+  allocations: UiAllocation[];
+  activeAlloc: number;
+  savedAt: string;
+};
+
+function loadPlannerDraft(): Partial<PlannerDraft> | null {
+  try {
+    const raw = localStorage.getItem(PLANNER_LS_KEY);
+    if (!raw) return null;
+    const data = JSON.parse(raw) as PlannerDraft;
+    if (!data || data.v !== 1) return null;
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function savePlannerDraft(draft: Omit<PlannerDraft, "v" | "savedAt">) {
+  try {
+    const payload: PlannerDraft = {
+      v: 1,
+      ...draft,
+      savedAt: new Date().toISOString(),
+    };
+    localStorage.setItem(PLANNER_LS_KEY, JSON.stringify(payload));
+  } catch {
+    /* private mode / quota */
+  }
+}
+
+function clearPlannerDraft() {
+  try {
+    localStorage.removeItem(PLANNER_LS_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+export function PlannerPanel() {
+  const draft = useMemo(() => loadPlannerDraft(), []);
+
+  const [profiles, setProfiles] = useState<TaxProfileDto[]>([]);
+  const [profileId, setProfileId] = useState<number | null>(
+    () => draft?.profileId ?? null,
+  );
+
+  const [horizonYears, setHorizonYears] = useState(
+    () => draft?.horizonYears ?? 10,
+  );
+  const [monthlyContribution, setMonthlyContribution] = useState(
+    () => draft?.monthlyContribution ?? 1000,
+  );
+  const [initialValue, setInitialValue] = useState(
+    () => draft?.initialValue ?? 50000,
+  );
+  /** Primary question: tax if you sell under post–Jul 2027 rules */
+  const [cgtRegime, setCgtRegime] = useState<CgtRegime>(
+    () => draft?.cgtRegime ?? "indexation_min30",
+  );
+  /** Also run under old 50% discount to show reform impact */
+  const [compareOldCgt, setCompareOldCgt] = useState(
+    () => draft?.compareOldCgt ?? true,
+  );
+
+  /** Expandable contribution path (keyframes + lump sums) */
+  const [showContributionPath, setShowContributionPath] = useState(
+    () => draft?.showContributionPath ?? false,
+  );
+  const [keyframes, setKeyframes] = useState<UiKeyframe[]>(
+    () => draft?.keyframes ?? [],
+  );
+  const [lumpSums, setLumpSums] = useState<UiLumpSum[]>(
+    () => draft?.lumpSums ?? [],
+  );
+  const [seedNote, setSeedNote] = useState<string | null>(null);
+  const [seedBusy, setSeedBusy] = useState(false);
+
+  const [allocations, setAllocations] = useState<UiAllocation[]>(
+    () => draft?.allocations ?? [],
+  );
+  const [activeAlloc, setActiveAlloc] = useState(
+    () => draft?.activeAlloc ?? 0,
+  );
+  const [draftSavedAt, setDraftSavedAt] = useState<string | null>(
+    () => draft?.savedAt ?? null,
+  );
+  const [hydrated, setHydrated] = useState(false);
+
+  const [report, setReport] = useState<ScenarioReport | null>(null);
+  const [reportOldCgt, setReportOldCgt] = useState<ScenarioReport | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const schedulePreview = useMemo(
+    () =>
+      contributionSchedulePreview(
+        monthlyContribution,
+        keyframes,
+        horizonYears,
+      ),
+    [monthlyContribution, keyframes, horizonYears],
+  );
+
+  const load = useCallback(async () => {
+    try {
+      const [rows, templates] = await Promise.all([
+        fetchTaxProfiles(),
+        fetchPlannerTemplates(),
+      ]);
+      setProfiles(rows);
+      const saved = loadPlannerDraft();
+      // Prefer saved profile if it still exists; else default
+      if (saved?.profileId != null && rows.some((r) => r.id === saved.profileId)) {
+        setProfileId(saved.profileId);
+      } else {
+        const def = rows.find((r) => r.isDefault) ?? rows[0];
+        if (def) setProfileId(def.id);
+      }
+      // Only load server templates if we have no saved strategies
+      if (templates.length && !(saved?.allocations && saved.allocations.length)) {
+        setAllocations(templates.map(fromApiAllocation));
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setHydrated(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Persist planner inputs (not run results) to localStorage
+  useEffect(() => {
+    if (!hydrated) return;
+    // Debounce slightly so typing doesn't thrash storage
+    const t = window.setTimeout(() => {
+      savePlannerDraft({
+        profileId,
+        horizonYears,
+        monthlyContribution,
+        initialValue,
+        cgtRegime,
+        compareOldCgt,
+        showContributionPath,
+        keyframes,
+        lumpSums,
+        allocations,
+        activeAlloc,
+      });
+      setDraftSavedAt(new Date().toISOString());
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [
+    hydrated,
+    profileId,
+    horizonYears,
+    monthlyContribution,
+    initialValue,
+    cgtRegime,
+    compareOldCgt,
+    showContributionPath,
+    keyframes,
+    lumpSums,
+    allocations,
+    activeAlloc,
+  ]);
+
+  const selectedProfile =
+    profiles.find((p) => p.id === profileId) ?? profiles[0];
+
+  function onResetPlannerDraft() {
+    if (
+      !window.confirm(
+        "Reset planner inputs to defaults? This clears saved strategies, contributions, and amounts from this browser.",
+      )
+    ) {
+      return;
+    }
+    clearPlannerDraft();
+    setHorizonYears(10);
+    setMonthlyContribution(1000);
+    setInitialValue(50000);
+    setCgtRegime("indexation_min30");
+    setCompareOldCgt(true);
+    setShowContributionPath(false);
+    setKeyframes([]);
+    setLumpSums([]);
+    setActiveAlloc(0);
+    setSeedNote(null);
+    setReport(null);
+    setReportOldCgt(null);
+    setDraftSavedAt(null);
+    // Reload templates as fresh allocations
+    void (async () => {
+      try {
+        const templates = await fetchPlannerTemplates();
+        if (templates.length) {
+          setAllocations(templates.map(fromApiAllocation));
+        }
+      } catch {
+        setAllocations([]);
+      }
+    })();
+  }
+
+  function updateAsset(
+    allocIdx: number,
+    assetIdx: number,
+    patch: Partial<UiAsset>,
+  ) {
+    setAllocations((prev) =>
+      prev.map((a, i) => {
+        if (i !== allocIdx) return a;
+        const assets = a.assets.map((row, j) =>
+          j === assetIdx ? { ...row, ...patch } : row,
+        );
+        return { ...a, assets };
+      }),
+    );
+  }
+
+  const [fetchingTicker, setFetchingTicker] = useState<string | null>(null);
+
+  /** Fill yield/growth/MER/franking from seed+cache, or live Yahoo if refresh. */
+  async function fillInstrument(
+    allocIdx: number,
+    assetIdx: number,
+    opts: { refresh?: boolean } = {},
+  ) {
+    const row = allocations[allocIdx]?.assets[assetIdx];
+    const ticker = row?.ticker?.trim().toUpperCase();
+    if (!ticker) {
+      setError("Enter a ticker first (e.g. VAS, A200, BGBL)");
+      return;
+    }
+    setFetchingTicker(`${allocIdx}:${assetIdx}`);
+    setError(null);
+    try {
+      const inst = await fetchInstrumentAssumptions(ticker, {
+        exchange: "ASX",
+        refresh: opts.refresh === true,
+      });
+      updateAsset(allocIdx, assetIdx, {
+        ticker: inst.ticker,
+        growthPct: round2(inst.growthRate * 100),
+        yieldPct: round2(inst.yieldRate * 100),
+        merPct: round3(inst.mer * 100),
+        frankingPct: inst.frankingPercent,
+      });
+      if (inst.error) {
+        setError(inst.error);
+      } else if (inst.notes?.length) {
+        // Soft note via seed line — keep non-blocking
+        setSeedNote(
+          `${inst.ticker}: ${inst.sources.join(", ")} · yld ${(inst.yieldRate * 100).toFixed(2)}% · mer ${(inst.mer * 100).toFixed(2)}%` +
+            (inst.fromCache ? " (cache)" : ""),
+        );
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFetchingTicker(null);
+    }
+  }
+
+  function addAsset(allocIdx: number) {
+    setAllocations((prev) =>
+      prev.map((a, i) =>
+        i === allocIdx ? { ...a, assets: [...a.assets, emptyRow()] } : a,
+      ),
+    );
+  }
+
+  function removeAsset(allocIdx: number, assetIdx: number) {
+    setAllocations((prev) =>
+      prev.map((a, i) => {
+        if (i !== allocIdx) return a;
+        if (a.assets.length <= 1) return a;
+        return { ...a, assets: a.assets.filter((_, j) => j !== assetIdx) };
+      }),
+    );
+  }
+
+  function updateAllocLabel(allocIdx: number, label: string) {
+    setAllocations((prev) =>
+      prev.map((a, i) => (i === allocIdx ? { ...a, label } : a)),
+    );
+  }
+
+  /** Set reinvest on every sleeve in a strategy (e.g. whole Dividend plan). */
+  function setStrategyReinvest(allocIdx: number, reinvest: boolean) {
+    setAllocations((prev) =>
+      prev.map((a, i) =>
+        i === allocIdx
+          ? {
+              ...a,
+              assets: a.assets.map((row) => ({ ...row, reinvest })),
+            }
+          : a,
+      ),
+    );
+  }
+
+  async function seedFromHoldings() {
+    setSeedBusy(true);
+    setSeedNote(null);
+    setError(null);
+    try {
+      const data = await fetchHoldings();
+      let market = data.totals.marketValueAud;
+      let cost = data.totals.costBaseAud;
+
+      if (market == null || !Number.isFinite(market)) {
+        let sumMv = 0;
+        let any = false;
+        for (const h of data.holdings) {
+          if (h.marketValueAud != null && Number.isFinite(h.marketValueAud)) {
+            sumMv += h.marketValueAud;
+            any = true;
+          }
+        }
+        market = any ? sumMv : null;
+      }
+      if (cost == null || !Number.isFinite(cost)) {
+        let sumCb = 0;
+        for (const h of data.holdings) {
+          if (h.costBaseAud != null && Number.isFinite(h.costBaseAud)) {
+            sumCb += h.costBaseAud;
+          }
+        }
+        // holdings costBase is always present as number on row; prefer totals
+        cost =
+          data.holdings.length > 0
+            ? data.holdings.reduce(
+                (s, h) => s + (h.costBaseAud ?? h.costBase ?? 0),
+                0,
+              )
+            : sumCb;
+      }
+
+      if (market == null || !Number.isFinite(market) || market <= 0) {
+        setSeedNote(
+          "No market value available from holdings (prices missing or empty portfolio).",
+        );
+        return;
+      }
+
+      const rounded = Math.round(market);
+      setInitialValue(rounded);
+      // Run path sets initialCostBaseAud = initialValue (same starting cost base)
+      setSeedNote(
+        `Starting value set to ${money(rounded)} from holdings market value` +
+          (cost != null && Number.isFinite(cost)
+            ? ` (cost base ~${money(Math.round(cost))} — planner uses start = cost base for new-buy model).`
+            : "."),
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setSeedBusy(false);
+    }
+  }
+
+  async function onRun() {
+    if (!selectedProfile) {
+      setError("Add a tax profile under Tax settings first");
+      return;
+    }
+    for (const a of allocations) {
+      const sum = a.assets.reduce((s, x) => s + (Number(x.weightPct) || 0), 0);
+      if (sum <= 0) {
+        setError(`${a.label}: add weights that sum above 0`);
+        return;
+      }
+      if (!a.assets.some((x) => x.ticker.trim())) {
+        setError(`${a.label}: add at least one ticker`);
+        return;
+      }
+    }
+
+    setBusy(true);
+    setError(null);
+    setReportOldCgt(null);
+    try {
+      const totalMonths = Math.max(1, horizonYears) * 12;
+      const contributionKeyframes = keyframes
+        .map((k) => ({
+          monthIndex: toMonthIndex(k.year, k.monthInYear),
+          monthlyAud: Math.max(0, Number(k.monthlyAud) || 0),
+        }))
+        .filter((k) => k.monthIndex >= 0 && k.monthIndex < totalMonths)
+        .sort((a, b) => a.monthIndex - b.monthIndex);
+
+      const lumps = lumpSums
+        .map((l) => ({
+          monthIndex: toMonthIndex(l.year, l.monthInYear),
+          amountAud: Math.max(0, Number(l.amountAud) || 0),
+        }))
+        .filter(
+          (l) =>
+            l.amountAud > 0 &&
+            l.monthIndex >= 0 &&
+            l.monthIndex < totalMonths,
+        );
+
+      const base = {
+        name: "New buys from Jul 2027 — growth vs dividend tax",
+        horizonYears,
+        // Fresh capital under new rules — cost base starts at contributions/initial
+        initialValueAud: initialValue,
+        initialCostBaseAud: initialValue,
+        monthlyContributionAud: monthlyContribution,
+        ...(contributionKeyframes.length
+          ? { contributionKeyframes }
+          : {}),
+        ...(lumps.length ? { lumpSums: lumps } : {}),
+        taxProfile: {
+          label: selectedProfile.label,
+          marginalRate: selectedProfile.marginalRate,
+          medicareLevy: selectedProfile.medicareLevy,
+        },
+        // Default only if an allocation omits exit (each strategy has its own)
+        exit: { type: "liquidate" as const },
+        allocations: allocations.map(toApiAllocation),
+      };
+
+      const result = await runPlanner({ ...base, cgtRegime });
+      setReport(result);
+
+      if (compareOldCgt && cgtRegime !== "discount_50") {
+        const old = await runPlanner({
+          ...base,
+          name: "Same plans under old 50% CGT discount",
+          cgtRegime: "discount_50",
+        });
+        setReportOldCgt(old);
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const current = allocations[activeAlloc];
+
+  return (
+    <section className="rounded-2xl border border-gray-800 bg-gray-900/40 p-5 shadow-xl shadow-black/20">
+      <div className="mb-1 flex flex-wrap items-start justify-between gap-2">
+        <h2 className="text-lg font-medium text-gray-100">
+          Planner · what to buy from Jul 2027 onwards
+        </h2>
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          {draftSavedAt && (
+            <span
+              className="rounded-md border border-gray-700 bg-gray-950/50 px-2 py-1 text-gray-500"
+              title="Inputs auto-save in this browser (localStorage)"
+            >
+              Saved locally ·{" "}
+              {new Date(draftSavedAt).toLocaleTimeString([], {
+                hour: "2-digit",
+                minute: "2-digit",
+              })}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={onResetPlannerDraft}
+            className="rounded-md border border-gray-700 bg-gray-900 px-2 py-1 text-gray-400 hover:border-gray-500 hover:text-gray-200"
+          >
+            Reset inputs
+          </button>
+        </div>
+      </div>
+      <p className="mb-3 text-sm text-gray-400">
+        Use this for <strong className="text-gray-200">new money after 1 Jul
+        2027</strong> (or any horizon where sales sit under the new CGT rules):
+        should you favour a <strong className="text-gray-200">growth</strong>{" "}
+        mix or a <strong className="text-gray-200">dividend</strong> mix once the
+        50% CGT discount is gone? Compare tax paths — income tax along the way
+        vs CGT when you sell — for the same contributions. Not for modelling
+        stocks you already bought years ago (use Holdings for that). Inputs
+        auto-save in this browser.
+      </p>
+      <ul className="mb-4 list-inside list-disc text-xs text-gray-500">
+        <li>
+          <strong className="text-gray-400">Assumes buys under the new regime</strong>{" "}
+          — default exit CGT = post–Jul 2027 model; optional compare to old 50%
+          discount.
+        </li>
+        <li>
+          <strong className="text-gray-400">Growth</strong> — lower yield, more
+          capital gain → more tax at sale under the new CGT floor.
+        </li>
+        <li>
+          <strong className="text-gray-400">Dividend</strong> — higher yield →
+          more income tax yearly; usually less exit CGT if gains are smaller.
+        </li>
+        <li>
+          CGT = sell value − cost base, then a <em>simplified</em> long-term
+          rate — not full CPI indexation of cost base. Estimates only.
+        </li>
+      </ul>
+
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <Field label="Tax profile">
+          <select
+            className="field"
+            value={profileId ?? ""}
+            onChange={(e) => setProfileId(Number(e.target.value))}
+          >
+            {profiles.length === 0 && (
+              <option value="">No profiles — set Tax settings</option>
+            )}
+            {profiles.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.label} ({(p.marginalRate * 100).toFixed(0)}% +{" "}
+                {(p.medicareLevy * 100).toFixed(0)}% Med)
+              </option>
+            ))}
+          </select>
+        </Field>
+        <Field label="Horizon (years)">
+          <input
+            className="field"
+            type="number"
+            min={1}
+            max={50}
+            value={horizonYears}
+            onChange={(e) => setHorizonYears(Number(e.target.value) || 1)}
+          />
+        </Field>
+        <Field label="Monthly contribution (AUD)">
+          <input
+            className="field"
+            type="number"
+            min={0}
+            step={100}
+            value={monthlyContribution}
+            onChange={(e) =>
+              setMonthlyContribution(Number(e.target.value) || 0)
+            }
+          />
+        </Field>
+        <div>
+          <Field label="Starting value (AUD)">
+            <input
+              className="field"
+              type="number"
+              min={0}
+              step={1000}
+              value={initialValue}
+              onChange={(e) => {
+                setInitialValue(Number(e.target.value) || 0);
+                setSeedNote(null);
+              }}
+            />
+          </Field>
+          <button
+            type="button"
+            disabled={seedBusy}
+            onClick={() => void seedFromHoldings()}
+            className="mt-1.5 text-xs text-emerald-400/90 hover:text-emerald-300 disabled:opacity-50"
+          >
+            {seedBusy
+              ? "Loading holdings…"
+              : "Seed starting value from holdings"}
+          </button>
+          {seedNote && (
+            <p className="mt-1 text-xs text-gray-400">{seedNote}</p>
+          )}
+        </div>
+        <Field label="CGT on exit (primary)">
+          <select
+            className="field"
+            value={cgtRegime}
+            onChange={(e) => setCgtRegime(e.target.value as CgtRegime)}
+          >
+            <option value="indexation_min30">
+              Post–Jul 2027 model (min 30% of gain)
+            </option>
+            <option value="discount_50">Old 50% CGT discount</option>
+            <option value="auto_by_date">
+              Auto by sale date (before/after 1 Jul 2027)
+            </option>
+          </select>
+        </Field>
+        <label className="flex items-end gap-2 pb-2 text-sm text-gray-300">
+          <input
+            type="checkbox"
+            checked={compareOldCgt}
+            onChange={(e) => setCompareOldCgt(e.target.checked)}
+            className="mb-2"
+          />
+          <span>
+            Also compare under <strong>old 50% discount</strong> (shows reform
+            impact)
+          </span>
+        </label>
+      </div>
+
+      {/* Contribution path: keyframes + lump sums */}
+      <div className="mb-4 rounded-xl border border-gray-800 bg-gray-950/30">
+        <button
+          type="button"
+          onClick={() => setShowContributionPath((v) => !v)}
+          className="flex w-full items-center justify-between px-4 py-3 text-left text-sm text-gray-200 hover:bg-gray-900/40"
+        >
+          <span className="font-medium">
+            Change contributions over time
+            {(keyframes.length > 0 || lumpSums.length > 0) && (
+              <span className="ml-2 text-xs font-normal text-emerald-400/80">
+                {keyframes.length > 0 &&
+                  `${keyframes.length} step${keyframes.length === 1 ? "" : "s"}`}
+                {keyframes.length > 0 && lumpSums.length > 0 && " · "}
+                {lumpSums.length > 0 &&
+                  `${lumpSums.length} lump${lumpSums.length === 1 ? "" : "s"}`}
+              </span>
+            )}
+          </span>
+          <span className="text-xs text-gray-500">
+            {showContributionPath ? "Hide" : "Show"}
+          </span>
+        </button>
+        {showContributionPath && (
+          <div className="border-t border-gray-800 px-4 py-3">
+            <p className="mb-3 text-xs text-gray-500">
+              Flat monthly amount applies from month 0. Each step below overrides
+              from that year (optional month) until the next step. Year 1 =
+              first 12 months of the plan.
+            </p>
+
+            <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-500">
+              Contribution steps
+            </div>
+            {keyframes.length === 0 && (
+              <p className="mb-2 text-xs text-gray-500">
+                No steps yet — whole horizon uses{" "}
+                {formatMoneyMo(monthlyContribution)}/mo.
+              </p>
+            )}
+            <div className="space-y-2">
+              {keyframes.map((k) => (
+                <div
+                  key={k.id}
+                  className="flex flex-wrap items-end gap-2 rounded-lg border border-gray-800/80 bg-gray-900/40 p-2"
+                >
+                  <Field label="From year">
+                    <input
+                      className="field w-20"
+                      type="number"
+                      min={1}
+                      max={horizonYears}
+                      value={k.year}
+                      onChange={(e) => {
+                        const year = Math.max(1, Number(e.target.value) || 1);
+                        setKeyframes((prev) =>
+                          prev.map((row) =>
+                            row.id === k.id ? { ...row, year } : row,
+                          ),
+                        );
+                      }}
+                    />
+                  </Field>
+                  <Field label="Month (opt.)">
+                    <input
+                      className="field w-20"
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={k.monthInYear}
+                      onChange={(e) => {
+                        const monthInYear = Math.min(
+                          12,
+                          Math.max(1, Number(e.target.value) || 1),
+                        );
+                        setKeyframes((prev) =>
+                          prev.map((row) =>
+                            row.id === k.id ? { ...row, monthInYear } : row,
+                          ),
+                        );
+                      }}
+                    />
+                  </Field>
+                  <Field label="Monthly AUD">
+                    <input
+                      className="field w-28"
+                      type="number"
+                      min={0}
+                      step={100}
+                      value={k.monthlyAud}
+                      onChange={(e) => {
+                        const monthlyAud = Number(e.target.value) || 0;
+                        setKeyframes((prev) =>
+                          prev.map((row) =>
+                            row.id === k.id ? { ...row, monthlyAud } : row,
+                          ),
+                        );
+                      }}
+                    />
+                  </Field>
+                  <button
+                    type="button"
+                    className="mb-0.5 text-xs text-red-400 hover:text-red-300"
+                    onClick={() =>
+                      setKeyframes((prev) =>
+                        prev.filter((row) => row.id !== k.id),
+                      )
+                    }
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() =>
+                setKeyframes((prev) => [
+                  ...prev,
+                  {
+                    id: newId(),
+                    year: Math.min(
+                      horizonYears,
+                      Math.max(
+                        2,
+                        (prev[prev.length - 1]?.year ?? 1) + 1,
+                      ),
+                    ),
+                    monthInYear: 1,
+                    monthlyAud: monthlyContribution,
+                  },
+                ])
+              }
+              className="mt-2 rounded-lg border border-gray-600 px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-800"
+            >
+              + Add contribution step
+            </button>
+
+            <p className="mt-3 rounded-lg border border-gray-800/60 bg-gray-900/50 px-3 py-2 text-xs text-gray-300">
+              <span className="text-gray-500">Schedule · </span>
+              {schedulePreview}
+            </p>
+
+            <div className="mb-2 mt-4 text-xs font-medium uppercase tracking-wide text-gray-500">
+              Lump sums (optional)
+            </div>
+            {lumpSums.length === 0 && (
+              <p className="mb-2 text-xs text-gray-500">
+                One-off amounts in a given plan year (e.g. bonus, inheritance).
+              </p>
+            )}
+            <div className="space-y-2">
+              {lumpSums.map((l) => (
+                <div
+                  key={l.id}
+                  className="flex flex-wrap items-end gap-2 rounded-lg border border-gray-800/80 bg-gray-900/40 p-2"
+                >
+                  <Field label="Year">
+                    <input
+                      className="field w-20"
+                      type="number"
+                      min={1}
+                      max={horizonYears}
+                      value={l.year}
+                      onChange={(e) => {
+                        const year = Math.max(1, Number(e.target.value) || 1);
+                        setLumpSums((prev) =>
+                          prev.map((row) =>
+                            row.id === l.id ? { ...row, year } : row,
+                          ),
+                        );
+                      }}
+                    />
+                  </Field>
+                  <Field label="Month">
+                    <input
+                      className="field w-20"
+                      type="number"
+                      min={1}
+                      max={12}
+                      value={l.monthInYear}
+                      onChange={(e) => {
+                        const monthInYear = Math.min(
+                          12,
+                          Math.max(1, Number(e.target.value) || 1),
+                        );
+                        setLumpSums((prev) =>
+                          prev.map((row) =>
+                            row.id === l.id ? { ...row, monthInYear } : row,
+                          ),
+                        );
+                      }}
+                    />
+                  </Field>
+                  <Field label="Amount AUD">
+                    <input
+                      className="field w-28"
+                      type="number"
+                      min={0}
+                      step={1000}
+                      value={l.amountAud}
+                      onChange={(e) => {
+                        const amountAud = Number(e.target.value) || 0;
+                        setLumpSums((prev) =>
+                          prev.map((row) =>
+                            row.id === l.id ? { ...row, amountAud } : row,
+                          ),
+                        );
+                      }}
+                    />
+                  </Field>
+                  <button
+                    type="button"
+                    className="mb-0.5 text-xs text-red-400 hover:text-red-300"
+                    onClick={() =>
+                      setLumpSums((prev) =>
+                        prev.filter((row) => row.id !== l.id),
+                      )
+                    }
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+            </div>
+            <button
+              type="button"
+              onClick={() =>
+                setLumpSums((prev) => [
+                  ...prev,
+                  {
+                    id: newId(),
+                    year: 1,
+                    monthInYear: 1,
+                    amountAud: 10000,
+                  },
+                ])
+              }
+              className="mt-2 rounded-lg border border-gray-600 px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-800"
+            >
+              + Add lump sum
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Strategy tabs */}
+      <div className="mb-3 flex flex-wrap gap-2">
+        {allocations.map((a, i) => (
+          <button
+            key={a.id}
+            type="button"
+            onClick={() => setActiveAlloc(i)}
+            className={`rounded-lg px-3 py-1.5 text-sm ${
+              i === activeAlloc
+                ? "bg-emerald-500/20 text-emerald-300"
+                : "bg-gray-800 text-gray-400 hover:text-gray-200"
+            }`}
+          >
+            {a.label}
+            <span className="ml-1 text-xs text-gray-500">
+              {a.exitType === "hold"
+                ? "· hold"
+                : a.exitType === "drawdown"
+                  ? "· drawdown"
+                  : "· sell"}{" "}
+              ·{" "}
+              {a.assets
+                .filter((x) => x.ticker)
+                .map((x) => x.ticker)
+                .join(" · ") || "empty"}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {current && (
+        <div className="mb-4 rounded-xl border border-gray-800 bg-gray-950/40 p-4">
+          <div className="mb-3 flex flex-wrap items-end gap-3">
+            <Field label="Strategy name">
+              <input
+                className="field max-w-xs"
+                value={current.label}
+                onChange={(e) => updateAllocLabel(activeAlloc, e.target.value)}
+              />
+            </Field>
+            <Field label="Exit for this strategy">
+              <select
+                className="field max-w-[240px]"
+                value={current.exitType}
+                onChange={(e) => {
+                  const exitType = e.target.value as UiExit;
+                  setAllocations((prev) =>
+                    prev.map((a, i) =>
+                      i === activeAlloc ? { ...a, exitType } : a,
+                    ),
+                  );
+                }}
+              >
+                <option value="liquidate">Sell all at end (CGT applies)</option>
+                <option value="hold">Hold (no exit CGT — income path)</option>
+                <option value="drawdown">Annual drawdown</option>
+              </select>
+            </Field>
+            {current.exitType === "drawdown" && (
+              <Field label="Drawdown % / year">
+                <input
+                  className="field w-24"
+                  type="number"
+                  min={0}
+                  max={50}
+                  step={0.5}
+                  value={current.drawdownPct}
+                  onChange={(e) => {
+                    const drawdownPct = Number(e.target.value) || 0;
+                    setAllocations((prev) =>
+                      prev.map((a, i) =>
+                        i === activeAlloc ? { ...a, drawdownPct } : a,
+                      ),
+                    );
+                  }}
+                />
+              </Field>
+            )}
+            <Field label="Dividends">
+              <select
+                className="field max-w-[220px]"
+                value={
+                  current.assets.length > 0 &&
+                  current.assets.every((x) => x.reinvest)
+                    ? "reinvest"
+                    : current.assets.length > 0 &&
+                        current.assets.every((x) => !x.reinvest)
+                      ? "cash"
+                      : "mixed"
+                }
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "reinvest") setStrategyReinvest(activeAlloc, true);
+                  if (v === "cash") setStrategyReinvest(activeAlloc, false);
+                }}
+              >
+                <option value="reinvest">Reinvest all (DRP)</option>
+                <option value="cash">Take cash (no reinvest)</option>
+                <option value="mixed" disabled>
+                  Mixed (set per ticker)
+                </option>
+              </select>
+            </Field>
+            <span className="pb-2 text-xs text-gray-500">
+              Weights sum:{" "}
+              {current.assets
+                .reduce((s, x) => s + (Number(x.weightPct) || 0), 0)
+                .toFixed(0)}
+              % (auto-normalised on run)
+            </span>
+            <button
+              type="button"
+              onClick={() => addAsset(activeAlloc)}
+              className="mb-0.5 rounded-lg border border-gray-600 px-3 py-1.5 text-xs text-gray-200 hover:bg-gray-800"
+            >
+              + Add ticker
+            </button>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[720px] text-left text-sm">
+              <thead className="text-xs uppercase tracking-wide text-gray-500">
+                <tr>
+                  <th className="pb-2 pr-2 font-medium">Ticker</th>
+                  <th className="pb-2 pr-2 font-medium">Weight %</th>
+                  <th className="pb-2 pr-2 font-medium">Growth % p.a.</th>
+                  <th className="pb-2 pr-2 font-medium">Yield % p.a.</th>
+                  <th className="pb-2 pr-2 font-medium">MER % p.a.</th>
+                  <th className="pb-2 pr-2 font-medium">Franking %</th>
+                  <th className="pb-2 pr-2 font-medium" title="Reinvest yield (DRP)">
+                    Reinvest
+                  </th>
+                  <th className="pb-2 pr-2 font-medium">Data</th>
+                  <th className="pb-2 font-medium" />
+                </tr>
+              </thead>
+              <tbody>
+                {current.assets.map((row, j) => (
+                  <tr key={j} className="border-t border-gray-800/80">
+                    <td className="py-1.5 pr-2">
+                      <input
+                        className="field w-24 uppercase"
+                        value={row.ticker}
+                        placeholder="BGBL"
+                        onChange={(e) =>
+                          updateAsset(activeAlloc, j, {
+                            ticker: e.target.value.toUpperCase(),
+                          })
+                        }
+                        onBlur={() => {
+                          // Apply seed/cache once when leaving ticker field (no Yahoo)
+                          if (row.ticker.trim().length >= 2) {
+                            void fillInstrument(activeAlloc, j, {
+                              refresh: false,
+                            });
+                          }
+                        }}
+                      />
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      <input
+                        className="field w-20"
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={1}
+                        value={row.weightPct}
+                        onChange={(e) =>
+                          updateAsset(activeAlloc, j, {
+                            weightPct: Number(e.target.value) || 0,
+                          })
+                        }
+                      />
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      <input
+                        className="field w-20"
+                        type="number"
+                        step={0.1}
+                        value={row.growthPct}
+                        onChange={(e) =>
+                          updateAsset(activeAlloc, j, {
+                            growthPct: Number(e.target.value) || 0,
+                          })
+                        }
+                      />
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      <input
+                        className="field w-20"
+                        type="number"
+                        step={0.1}
+                        value={row.yieldPct}
+                        onChange={(e) =>
+                          updateAsset(activeAlloc, j, {
+                            yieldPct: Number(e.target.value) || 0,
+                          })
+                        }
+                      />
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      <input
+                        className="field w-20"
+                        type="number"
+                        step={0.01}
+                        value={row.merPct}
+                        onChange={(e) =>
+                          updateAsset(activeAlloc, j, {
+                            merPct: Number(e.target.value) || 0,
+                          })
+                        }
+                      />
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      <input
+                        className="field w-20"
+                        type="number"
+                        min={0}
+                        max={100}
+                        step={5}
+                        value={row.frankingPct}
+                        onChange={(e) =>
+                          updateAsset(activeAlloc, j, {
+                            frankingPct: Number(e.target.value) || 0,
+                          })
+                        }
+                      />
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      <input
+                        type="checkbox"
+                        checked={row.reinvest}
+                        onChange={(e) =>
+                          updateAsset(activeAlloc, j, {
+                            reinvest: e.target.checked,
+                          })
+                        }
+                      />
+                    </td>
+                    <td className="py-1.5 pr-2">
+                      <div className="flex flex-col gap-0.5">
+                        <button
+                          type="button"
+                          disabled={
+                            busy ||
+                            fetchingTicker === `${activeAlloc}:${j}` ||
+                            !row.ticker.trim()
+                          }
+                          className="whitespace-nowrap text-xs text-sky-400 hover:text-sky-300 disabled:opacity-40"
+                          title="Apply BetaShares/Vanguard seed or last cached fetch (no Yahoo)"
+                          onClick={() =>
+                            void fillInstrument(activeAlloc, j, {
+                              refresh: false,
+                            })
+                          }
+                        >
+                          {fetchingTicker === `${activeAlloc}:${j}`
+                            ? "…"
+                            : "Seed"}
+                        </button>
+                        <button
+                          type="button"
+                          disabled={
+                            busy ||
+                            fetchingTicker === `${activeAlloc}:${j}` ||
+                            !row.ticker.trim()
+                          }
+                          className="whitespace-nowrap text-xs text-amber-400/90 hover:text-amber-300 disabled:opacity-40"
+                          title="Refresh: seed MER + Yahoo trailing yield / hist. growth (manual only)"
+                          onClick={() =>
+                            void fillInstrument(activeAlloc, j, {
+                              refresh: true,
+                            })
+                          }
+                        >
+                          Refresh
+                        </button>
+                      </div>
+                    </td>
+                    <td className="py-1.5">
+                      <button
+                        type="button"
+                        className="text-xs text-red-400 hover:text-red-300"
+                        onClick={() => removeAsset(activeAlloc, j)}
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-2 text-xs text-gray-500">
+            <strong className="text-gray-400">Seed</strong> = BetaShares /
+            Vanguard curated defaults or last cache (no network).{" "}
+            <strong className="text-gray-400">Refresh</strong> = optional Yahoo
+            trailing yield + rough hist. growth (once per click; respects
+            cool-down). MER/franking stay from seed. Growth is never an issuer
+            forecast — always an assumption. Blur ticker also applies seed.
+          </p>
+        </div>
+      )}
+
+      {/* Summary of all strategies */}
+      <div className="mb-4 grid gap-2 sm:grid-cols-3">
+        {allocations.map((a) => (
+          <div
+            key={a.id}
+            className="rounded-lg border border-gray-800 bg-gray-950/30 px-3 py-2 text-xs text-gray-400"
+          >
+            <div className="font-medium text-gray-200">{a.label}</div>
+            {a.assets
+              .filter((x) => x.ticker)
+              .map((x, i) => (
+                <div key={i}>
+                  {x.ticker} {x.weightPct}% · yld {x.yieldPct}% · gr{" "}
+                  {x.growthPct}%
+                </div>
+              ))}
+          </div>
+        ))}
+      </div>
+
+      <button
+        type="button"
+        disabled={busy}
+        onClick={() => void onRun()}
+        className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
+      >
+        {busy ? "Running…" : "Run tax comparison"}
+      </button>
+
+      {error && (
+        <div className="mt-3 rounded-lg border border-red-900/50 bg-red-950/40 px-3 py-2 text-sm text-red-200">
+          {error}
+        </div>
+      )}
+
+      {report && (
+        <div className="mt-6 space-y-6">
+          <div>
+            <h3 className="mb-1 text-sm font-medium text-gray-200">
+              Tax story · sell at end under{" "}
+              <span className="text-emerald-300">
+                {cgtRegimeLabel(report.cgtRegime)}
+              </span>
+            </h3>
+            <p className="mb-3 text-xs text-gray-500">
+              {report.startDate} → {report.endDate} ({report.horizonYears}y) ·
+              exit: {report.exit.type}. Compare{" "}
+              <strong className="text-gray-400">income tax along the way</strong>{" "}
+              vs <strong className="text-gray-400">CGT when you sell</strong>.
+            </p>
+            <ResultsTable report={report} emphasizeTax />
+            <YearByYearPanel report={report} />
+          </div>
+
+          <SwitchIncomePanel
+            report={report}
+            allocations={allocations}
+            taxProfile={selectedProfile}
+          />
+
+          {reportOldCgt && (
+            <div>
+              <h3 className="mb-1 text-sm font-medium text-gray-200">
+                Same plans · if CGT still used{" "}
+                <span className="text-amber-200">old 50% discount</span>
+              </h3>
+              <p className="mb-3 text-xs text-gray-500">
+                Same contributions and returns — only exit CGT rules change.
+                Growth usually loses more under the new floor; high-income paths
+                change less if gains are small.
+              </p>
+              <ResultsTable report={reportOldCgt} emphasizeTax />
+              <div className="mt-3 overflow-auto rounded-lg border border-amber-900/40 bg-amber-950/20">
+                <table className="w-full min-w-[640px] text-left text-sm">
+                  <thead className="text-xs uppercase tracking-wide text-amber-200/70">
+                    <tr>
+                      <th className="px-3 py-2 font-medium">
+                        Extra tax from new CGT (new − old)
+                      </th>
+                      {report.allocations.map((a) => (
+                        <th key={a.allocationId} className="px-3 py-2 font-medium">
+                          {a.label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-t border-amber-900/30">
+                      <td className="px-3 py-2 text-gray-400">
+                        Extra exit CGT under new rules
+                      </td>
+                      {report.allocations.map((a, i) => {
+                        const old = reportOldCgt.allocations[i];
+                        const delta =
+                          (a.exitCgtTax ?? 0) - (old?.exitCgtTax ?? 0);
+                        return (
+                          <td
+                            key={a.allocationId}
+                            className={`px-3 py-2 tabular-nums ${
+                              delta > 0 ? "text-red-300" : "text-gray-200"
+                            }`}
+                          >
+                            {money(delta)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                    <tr className="border-t border-amber-900/30">
+                      <td className="px-3 py-2 text-gray-400">
+                        Net gain after tax (new vs old)
+                      </td>
+                      {report.allocations.map((a, i) => {
+                        const old = reportOldCgt.allocations[i];
+                        const nNew =
+                          a.netGainAfterTax ??
+                          a.netIfLiquidated - a.totalContributions;
+                        const nOld =
+                          old?.netGainAfterTax ??
+                          (old
+                            ? old.netIfLiquidated - old.totalContributions
+                            : 0);
+                        const delta = nNew - nOld;
+                        return (
+                          <td
+                            key={a.allocationId}
+                            className={`px-3 py-2 tabular-nums ${
+                              delta < 0 ? "text-red-300" : "text-emerald-300"
+                            }`}
+                          >
+                            {money(delta)}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+
+          <p className="text-xs text-gray-500">
+            <strong className="text-gray-400">Net gain after tax</strong> = cash
+            after exit CGT − contributions (income tax already reduced the
+            portfolio).{" "}
+            <strong className="text-gray-400">
+              Not true CPI-indexed cost base
+            </strong>
+            : capital gain = sell value − cost base; post‑2027 mode applies a
+            simplified floor rate on that gain.
+          </p>
+        </div>
+      )}
+
+      <div className="mt-6">
+        <Disclaimer />
+      </div>
+
+      <style>{`
+        .field {
+          width: 100%;
+          border-radius: 0.5rem;
+          border: 1px solid #374151;
+          background: #111827;
+          padding: 0.4rem 0.6rem;
+          font-size: 0.875rem;
+          color: #f3f4f6;
+        }
+      `}</style>
+    </section>
+  );
+}
+
+function cgtRegimeLabel(r: string) {
+  if (r === "indexation_min30") return "post–Jul 2027 (min 30% of gain)";
+  if (r === "discount_50") return "old 50% CGT discount";
+  if (r === "auto_by_date") return "auto by sale date";
+  return r;
+}
+
+/** Company tax rate for franking gross-up (matches packages/core). */
+const COMPANY_TAX = 0.3;
+
+/**
+ * Rough dividend tax on cash yield — same simplified model as the planner engine.
+ * Net tax can be negative when franking exceeds tax (refundable credits).
+ */
+function estimateDivTaxRough(
+  cashAud: number,
+  frankingPercent: number,
+  marginalRate: number,
+  medicareLevy: number,
+): { grossTax: number; frankingCredits: number; netTax: number } {
+  if (cashAud <= 0) {
+    return { grossTax: 0, frankingCredits: 0, netTax: 0 };
+  }
+  const frank = Math.min(100, Math.max(0, frankingPercent)) / 100;
+  const frankingCredits =
+    frank > 0 ? cashAud * frank * (COMPANY_TAX / (1 - COMPANY_TAX)) : 0;
+  const assessable = cashAud + frankingCredits;
+  const rate = marginalRate + medicareLevy;
+  const grossTax = assessable * rate;
+  return {
+    grossTax,
+    frankingCredits,
+    netTax: grossTax - frankingCredits,
+  };
+}
+
+type TargetYieldBreakdown = {
+  ticker: string;
+  weight: number;
+  yieldPct: number;
+  frankingPct: number;
+  reinvest: boolean;
+  /** Gross $ on redeployed capital */
+  grossAud: number;
+  /** Net tax on this sleeve's gross */
+  netTaxAud: number;
+};
+
+function blendedTargetYield(target: UiAllocation, redeployAud: number) {
+  const rows = target.assets.filter((a) => a.ticker.trim());
+  const weightSum = rows.reduce((s, a) => s + Math.max(0, a.weightPct), 0) || 1;
+  const sleeves: TargetYieldBreakdown[] = rows.map((a) => {
+    const w = Math.max(0, a.weightPct) / weightSum;
+    const y = Math.max(0, a.yieldPct) / 100;
+    const grossAud = redeployAud * w * y;
+    return {
+      ticker: a.ticker.trim().toUpperCase(),
+      weight: w,
+      yieldPct: a.yieldPct,
+      frankingPct: a.frankingPct,
+      reinvest: a.reinvest,
+      grossAud,
+      netTaxAud: 0, // filled by caller with tax profile
+    };
+  });
+  const totalYieldPct = sleeves.reduce((s, x) => s + x.weight * x.yieldPct, 0);
+  const cashYieldPct = sleeves
+    .filter((x) => !x.reinvest)
+    .reduce((s, x) => s + x.weight * x.yieldPct, 0);
+  const reinvestYieldPct = sleeves
+    .filter((x) => x.reinvest)
+    .reduce((s, x) => s + x.weight * x.yieldPct, 0);
+  return { sleeves, totalYieldPct, cashYieldPct, reinvestYieldPct };
+}
+
+/**
+ * Phase-2 income after accumulating in one strategy, selling, then buying another.
+ * Pure UI estimate from the last run + current ticker assumptions.
+ */
+function SwitchIncomePanel({
+  report,
+  allocations,
+  taxProfile,
+}: {
+  report: ScenarioReport;
+  allocations: UiAllocation[];
+  taxProfile?: TaxProfileDto | null;
+}) {
+  const byId = (id: string) =>
+    report.allocations.find((a) => a.allocationId === id) ??
+    report.allocations[0];
+
+  const prefer = (ids: string[]) => {
+    for (const id of ids) {
+      const hit = report.allocations.find(
+        (a) =>
+          a.allocationId === id ||
+          a.label.toLowerCase().includes(id.toLowerCase()),
+      );
+      if (hit) return hit.allocationId;
+    }
+    return report.allocations[0]?.allocationId ?? "";
+  };
+
+  const switchDraft = useMemo(() => {
+    try {
+      const raw = localStorage.getItem(SWITCH_LS_KEY);
+      if (!raw) return null;
+      return JSON.parse(raw) as {
+        sourceId?: string;
+        targetId?: string;
+        includeCashDivs?: boolean;
+      };
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const [sourceId, setSourceId] = useState(() => {
+    if (
+      switchDraft?.sourceId &&
+      report.allocations.some((a) => a.allocationId === switchDraft.sourceId)
+    ) {
+      return switchDraft.sourceId;
+    }
+    return prefer(["growth", "Growth"]);
+  });
+  // Default phase 2 = Dividend (full high-yield income), not Hybrid
+  const [targetId, setTargetId] = useState(() => {
+    if (
+      switchDraft?.targetId &&
+      report.allocations.some((a) => a.allocationId === switchDraft.targetId)
+    ) {
+      return switchDraft.targetId;
+    }
+    return prefer(["dividend", "Dividend", "hybrid", "Hybrid"]);
+  });
+  const [includeCashDivs, setIncludeCashDivs] = useState(
+    () => switchDraft?.includeCashDivs ?? false,
+  );
+
+  // Keep defaults sensible when report strategies change
+  useEffect(() => {
+    const ids = new Set(report.allocations.map((a) => a.allocationId));
+    if (!ids.has(sourceId)) setSourceId(prefer(["growth", "Growth"]));
+    if (!ids.has(targetId))
+      setTargetId(prefer(["dividend", "Dividend", "hybrid", "Hybrid"]));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- only re-sync when report changes
+  }, [report]);
+
+  // Persist switch choices
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        SWITCH_LS_KEY,
+        JSON.stringify({ sourceId, targetId, includeCashDivs }),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [sourceId, targetId, includeCashDivs]);
+
+  const source = byId(sourceId);
+  const targetReport = byId(targetId);
+  const targetUi =
+    allocations.find(
+      (a) => a.id === targetId || a.label === targetReport?.label,
+    ) ?? allocations.find((a) => a.id === targetReport?.allocationId);
+
+  if (!source || !targetReport || !targetUi) {
+    return null;
+  }
+
+  const portfolioAfterCgt = source.netIfLiquidated ?? 0;
+  const cashDivs = source.totalDividendsCash ?? 0;
+  const redeploy =
+    portfolioAfterCgt + (includeCashDivs ? cashDivs : 0);
+
+  const blend = blendedTargetYield(targetUi, redeploy);
+  const mtr = taxProfile?.marginalRate ?? 0.37;
+  const med = taxProfile?.medicareLevy ?? 0.02;
+
+  let grossCash = 0;
+  let grossReinvest = 0;
+  let taxOnCash = 0;
+  let taxOnReinvest = 0;
+  const sleeves = blend.sleeves.map((s) => {
+    const tax = estimateDivTaxRough(s.grossAud, s.frankingPct, mtr, med);
+    if (s.reinvest) {
+      grossReinvest += s.grossAud;
+      taxOnReinvest += Math.max(0, tax.netTax);
+    } else {
+      grossCash += s.grossAud;
+      taxOnCash += Math.max(0, tax.netTax);
+    }
+    return { ...s, netTaxAud: tax.netTax };
+  });
+
+  const grossTotal = grossCash + grossReinvest;
+  /** AU: DRP distributions are still assessable — tax on cash + DRP */
+  const taxOnAllDistributions = taxOnCash + taxOnReinvest;
+  const netCashInHand = grossCash - taxOnCash;
+  // If all DRP, tax is still due (paid from other cash / smaller reinvestment)
+  const economicAfterTax = grossTotal - taxOnAllDistributions;
+
+  // Stay-in-Dividend path: year-by-year sim final year + tax on full yield
+  const dividendStrategy =
+    report.allocations.find(
+      (a) =>
+        a.allocationId === "dividend" ||
+        a.label.toLowerCase().includes("dividend"),
+    ) ?? null;
+  const divYears = dividendStrategy?.years ?? [];
+  const lastDivYear = divYears.length
+    ? divYears[divYears.length - 1]!
+    : null;
+  const dividendSameYearCash = lastDivYear?.dividendsCash ?? 0;
+  const dividendSameYearReinv = lastDivYear?.dividendsReinvested ?? 0;
+  const dividendSameYearTotal =
+    dividendSameYearCash + dividendSameYearReinv;
+  const dividendSameYearNum = lastDivYear?.year ?? report.horizonYears;
+  // Prefer sim's income tax for that year when present (engine taxes DRP too)
+  const simYearIncomeTax = lastDivYear?.incomeTax ?? null;
+  const dividendUi =
+    allocations.find(
+      (a) =>
+        a.id === dividendStrategy?.allocationId ||
+        a.label === dividendStrategy?.label,
+    ) ?? null;
+
+  /** Tax all distributions (cash + DRP) by sleeve — mirrors path A */
+  let dividendSameYearTaxCash = 0;
+  let dividendSameYearTaxDrp = 0;
+  if (dividendUi && dividendSameYearTotal > 0) {
+    const rows = dividendUi.assets.filter((x) => x.ticker.trim());
+    const wSum = rows.reduce((s, x) => s + Math.max(0, x.weightPct), 0) || 1;
+    for (const s of rows) {
+      const w = Math.max(0, s.weightPct) / wSum;
+      const y = Math.max(0, s.yieldPct);
+      // Split this sleeve's share of year yield by cash vs DRP mode
+      const sleeveGross = dividendSameYearTotal * w;
+      // Prefer weight×yield share if yields set
+      const ySum = rows.reduce(
+        (acc, r) => acc + Math.max(0, r.weightPct) * Math.max(0, r.yieldPct),
+        0,
+      );
+      const sleeveShare =
+        ySum > 0
+          ? (Math.max(0, s.weightPct) * y) / ySum
+          : w;
+      const sleeveAud = dividendSameYearTotal * sleeveShare;
+      const tax = estimateDivTaxRough(
+        sleeveAud,
+        s.frankingPct,
+        mtr,
+        med,
+      );
+      if (s.reinvest) dividendSameYearTaxDrp += Math.max(0, tax.netTax);
+      else dividendSameYearTaxCash += Math.max(0, tax.netTax);
+      void sleeveGross;
+    }
+  } else if (dividendSameYearTotal > 0) {
+    const tax = estimateDivTaxRough(dividendSameYearTotal, 70, mtr, med);
+    if (dividendSameYearCash > 0 && dividendSameYearReinv <= 0) {
+      dividendSameYearTaxCash = Math.max(0, tax.netTax);
+    } else if (dividendSameYearCash <= 0) {
+      dividendSameYearTaxDrp = Math.max(0, tax.netTax);
+    } else {
+      const cashFrac = dividendSameYearCash / dividendSameYearTotal;
+      dividendSameYearTaxCash = Math.max(0, tax.netTax * cashFrac);
+      dividendSameYearTaxDrp = Math.max(0, tax.netTax * (1 - cashFrac));
+    }
+  }
+  // Prefer engine year tax when available (already includes franking model)
+  const dividendSameYearTaxAll =
+    simYearIncomeTax != null && simYearIncomeTax > 0
+      ? simYearIncomeTax
+      : dividendSameYearTaxCash + dividendSameYearTaxDrp;
+  const dividendSameYearNetCash =
+    dividendSameYearCash - dividendSameYearTaxCash;
+  const dividendEconomicAfterTax =
+    dividendSameYearTotal - dividendSameYearTaxAll;
+  const allDrpAfterSwitch = grossCash <= 0 && grossReinvest > 0;
+  const allDrpDividendPath =
+    dividendSameYearCash <= 0 && dividendSameYearReinv > 0;
+
+  const strategyHint = (label: string) => {
+    const l = label.toLowerCase();
+    if (l.includes("dividend")) return "Full income mix (~5.5–6% yield)";
+    if (l.includes("hybrid")) return "½ growth + ½ yield (~3.5% total)";
+    if (l.includes("growth")) return "High growth, low cash yield";
+    return "Your custom mix";
+  };
+
+  return (
+    <div className="rounded-xl border border-sky-900/50 bg-sky-950/20 p-4">
+      <h3 className="mb-1 text-sm font-medium text-sky-100">
+        Switch at end · choose strategies
+      </h3>
+      <p className="mb-4 text-xs text-gray-500">
+        Pick which strategy you run for 10 years, then which strategy gets{" "}
+        <strong className="text-gray-400">100% of the sale proceeds</strong> for
+        income. Numbers update instantly — no need to re-run the main comparison.
+      </p>
+
+      {/* Strategy choosers — primary UI */}
+      <div className="mb-4 grid gap-4 lg:grid-cols-2">
+        <div className="rounded-lg border border-gray-800 bg-gray-950/40 p-3">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-gray-400">
+            1 · Accumulate in (then sell)
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {report.allocations.map((a) => {
+              const on = a.allocationId === sourceId;
+              return (
+                <button
+                  key={`src-${a.allocationId}`}
+                  type="button"
+                  onClick={() => setSourceId(a.allocationId)}
+                  className={`rounded-lg border px-3 py-2 text-left text-sm transition ${
+                    on
+                      ? "border-sky-500 bg-sky-500/20 text-sky-100 ring-1 ring-sky-500/50"
+                      : "border-gray-700 bg-gray-900 text-gray-300 hover:border-gray-500"
+                  }`}
+                >
+                  <div className="font-medium">{a.label}</div>
+                  <div className="text-[10px] text-gray-500">
+                    {strategyHint(a.label)}
+                  </div>
+                  <div className="mt-0.5 text-[11px] tabular-nums text-gray-400">
+                    net {money(a.netIfLiquidated)}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
+        <div className="rounded-lg border border-emerald-900/40 bg-emerald-950/20 p-3">
+          <div className="mb-2 text-xs font-medium uppercase tracking-wide text-emerald-300/80">
+            2 · Put all sale cash into
+          </div>
+          <div className="flex flex-wrap gap-2">
+            {report.allocations.map((a) => {
+              const on = a.allocationId === targetId;
+              return (
+                <button
+                  key={`tgt-${a.allocationId}`}
+                  type="button"
+                  onClick={() => setTargetId(a.allocationId)}
+                  className={`rounded-lg border px-3 py-2 text-left text-sm transition ${
+                    on
+                      ? "border-emerald-500 bg-emerald-500/20 text-emerald-100 ring-1 ring-emerald-500/50"
+                      : "border-gray-700 bg-gray-900 text-gray-300 hover:border-gray-500"
+                  }`}
+                >
+                  <div className="font-medium">{a.label}</div>
+                  <div className="text-[10px] text-gray-500">
+                    {strategyHint(a.label)}
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+
+      <div className="mb-3 flex flex-wrap items-center gap-3">
+        <label className="flex cursor-pointer items-start gap-2 text-sm text-gray-300">
+          <input
+            type="checkbox"
+            className="mt-1"
+            checked={includeCashDivs}
+            onChange={(e) => setIncludeCashDivs(e.target.checked)}
+          />
+          <span>
+            Also redeploy phase‑1 cash dividends ({money(cashDivs)})
+            <span className="mt-0.5 block text-xs text-gray-500">
+              Only if you saved them. Default = portfolio after exit CGT only.
+            </span>
+          </span>
+        </label>
+      </div>
+
+      <div className="mb-3 rounded-lg border border-sky-800/40 bg-sky-950/30 px-3 py-2.5 text-sm text-sky-100/90">
+        <div>
+          <strong className="text-sky-100">{source.label}</strong>
+          <span className="text-gray-500"> → sell → all </span>
+          <strong className="text-sky-100">{money(redeploy)}</strong>
+          <span className="text-gray-500"> → </span>
+          <strong className="text-emerald-200">{targetReport.label}</strong>
+        </div>
+        <div className="mt-1 text-xs text-gray-400">
+          {targetReport.label} cash yield{" "}
+          <strong className="text-gray-300">
+            {blend.cashYieldPct.toFixed(2)}%
+          </strong>{" "}
+          p.a. → year‑1 gross cash{" "}
+          <strong className="text-emerald-200">{money(grossCash)}</strong>
+          {blend.reinvestYieldPct > 0.01 && (
+            <>
+              {" "}
+              (+ {money(grossReinvest)} DRP)
+            </>
+          )}
+        </div>
+        {targetReport.label.toLowerCase().includes("hybrid") && (
+          <div className="mt-1.5 text-xs text-amber-200/90">
+            Hybrid is only ~half high‑yield. Click{" "}
+            <strong>Dividend</strong> under “Put all sale cash into” for ~5.5–6%
+            on the full {money(redeploy)}.
+          </div>
+        )}
+      </div>
+
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard
+          label="Phase 1 portfolio after exit CGT"
+          value={money(portfolioAfterCgt)}
+          hint={`${source.label} · net if liquidated`}
+        />
+        <StatCard
+          label={`All redeployed into ${targetReport.label}`}
+          value={money(redeploy)}
+          hint={
+            includeCashDivs
+              ? "portfolio + saved cash divs · 100% of pile"
+              : "100% of pile after exit CGT"
+          }
+          emphasize
+        />
+        <StatCard
+          label={`${targetReport.label} blended yield`}
+          value={`${blend.totalYieldPct.toFixed(2)}% p.a.`}
+          hint={`cash ${blend.cashYieldPct.toFixed(2)}% · DRP ${blend.reinvestYieldPct.toFixed(2)}%`}
+        />
+        <StatCard
+          label="Year‑1 cash dividends (gross)"
+          value={money(grossCash)}
+          hint={
+            grossReinvest > 0
+              ? `+ ${money(grossReinvest)} DRP (not cash)`
+              : `= ${money(redeploy)} × ${blend.cashYieldPct.toFixed(2)}% cash`
+          }
+          emphasize
+        />
+      </div>
+
+      {(allDrpAfterSwitch || allDrpDividendPath) && (
+        <p className="mb-3 rounded-lg border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-100/90">
+          <strong>Cash is $0 because reinvest (DRP) is on</strong> for those
+          sleeves — yield still happens, but it buys more units instead of
+          paying cash. Turn <strong>Reinvest</strong> off on the Dividend
+          strategy (and re-run) if you want bankable dividends in this table.
+        </p>
+      )}
+
+      {!dividendStrategy && (
+        <p className="mb-4 text-xs text-amber-200/80">
+          No “Dividend” strategy in this run — add one to the main comparison to
+          compare “never switched” vs “switch at end”.
+        </p>
+      )}
+
+      <div className="mb-4 overflow-auto rounded-lg border border-gray-800">
+        <table className="w-full min-w-[640px] text-left text-sm">
+          <thead className="bg-gray-900/80 text-xs uppercase tracking-wide text-gray-500">
+            <tr>
+              <th className="px-3 py-2 font-medium">Metric</th>
+              <th className="px-3 py-2 font-medium text-sky-200/90">
+                A · Switch at end
+                <div className="mt-0.5 max-w-[14rem] text-[10px] font-normal normal-case leading-snug text-gray-500">
+                  {source.label} for {report.horizonYears}y → sell → all cash
+                  into {targetReport.label} →{" "}
+                  <strong className="text-gray-400">year 1</strong> income on
+                  that pile
+                </div>
+              </th>
+              {dividendStrategy && (
+                <th className="px-3 py-2 font-medium text-violet-200/90">
+                  B · Never switched
+                  <div className="mt-0.5 max-w-[14rem] text-[10px] font-normal normal-case leading-snug text-gray-500">
+                    Stayed in {dividendStrategy.label} for all{" "}
+                    {report.horizonYears} years →{" "}
+                    <strong className="text-gray-400">
+                      year {dividendSameYearNum}
+                    </strong>{" "}
+                    from the full sim (same calendar year as the switch)
+                  </div>
+                </th>
+              )}
+            </tr>
+          </thead>
+          <tbody>
+            <tr className="border-t border-gray-800/80">
+              <td className="px-3 py-2 text-gray-400">
+                Portfolio capital (end of path / start of income year)
+              </td>
+              <td className="px-3 py-2 tabular-nums text-gray-100">
+                {money(redeploy)}
+                <div className="text-[10px] text-gray-500">
+                  after exit CGT on {source.label}
+                </div>
+              </td>
+              {dividendStrategy && (
+                <td className="px-3 py-2 tabular-nums text-violet-100/90">
+                  {money(dividendStrategy.finalValue)}
+                  <div className="text-[10px] text-gray-500">
+                    still invested (no forced sale)
+                  </div>
+                </td>
+              )}
+            </tr>
+            <tr className="border-t border-gray-800/80 bg-emerald-500/5">
+              <td className="px-3 py-2 text-gray-400">
+                Cash income that year (to bank)
+              </td>
+              <td className="px-3 py-2 tabular-nums font-medium text-emerald-200">
+                {money(grossCash)}
+                {allDrpAfterSwitch && (
+                  <div className="text-[10px] font-normal text-amber-200/80">
+                    all reinvested — see DRP row
+                  </div>
+                )}
+              </td>
+              {dividendStrategy && (
+                <td className="px-3 py-2 tabular-nums font-medium text-violet-100">
+                  {money(dividendSameYearCash)}
+                  {allDrpDividendPath && (
+                    <div className="text-[10px] font-normal text-amber-200/80">
+                      all reinvested — see DRP row
+                    </div>
+                  )}
+                </td>
+              )}
+            </tr>
+            <tr className="border-t border-gray-800/80">
+              <td className="px-3 py-2 text-gray-400">
+                DRP that year (stays in portfolio)
+              </td>
+              <td className="px-3 py-2 tabular-nums text-gray-100">
+                {money(grossReinvest)}
+              </td>
+              {dividendStrategy && (
+                <td className="px-3 py-2 tabular-nums text-violet-100/90">
+                  {money(dividendSameYearReinv)}
+                </td>
+              )}
+            </tr>
+            <tr className="border-t border-gray-800/80">
+              <td className="px-3 py-2 text-gray-400">
+                Total yield that year (cash + DRP)
+              </td>
+              <td className="px-3 py-2 tabular-nums text-gray-100">
+                {money(grossTotal)}
+              </td>
+              {dividendStrategy && (
+                <td className="px-3 py-2 tabular-nums text-violet-100/90">
+                  {money(dividendSameYearTotal)}
+                </td>
+              )}
+            </tr>
+            <tr className="border-t border-gray-800/80 bg-amber-500/5">
+              <td className="px-3 py-2 text-gray-400">
+                Est. tax on distributions (cash + DRP)
+                {taxProfile
+                  ? ` (${(mtr * 100).toFixed(0)}%+${(med * 100).toFixed(0)}% Med)`
+                  : ""}
+                <div className="text-[10px] text-gray-500 normal-case">
+                  AU: DRP is still taxable income — not $0 just because reinvested
+                </div>
+              </td>
+              <td className="px-3 py-2 tabular-nums text-amber-100">
+                {money(taxOnAllDistributions)}
+                {(taxOnCash > 0 || taxOnReinvest > 0) && (
+                  <div className="text-[10px] text-gray-500">
+                    cash {money(taxOnCash)} · DRP {money(taxOnReinvest)}
+                  </div>
+                )}
+              </td>
+              {dividendStrategy && (
+                <td className="px-3 py-2 tabular-nums text-amber-100/90">
+                  {money(dividendSameYearTaxAll)}
+                  {simYearIncomeTax != null && simYearIncomeTax > 0 && (
+                    <div className="text-[10px] text-gray-500">
+                      from sim year {dividendSameYearNum}
+                    </div>
+                  )}
+                </td>
+              )}
+            </tr>
+            <tr className="border-t border-gray-800/80 bg-emerald-500/5">
+              <td className="px-3 py-2 text-gray-400">
+                Cash in hand after tax on cash portion
+              </td>
+              <td className="px-3 py-2 tabular-nums font-medium text-emerald-200">
+                {money(netCashInHand)}
+                {allDrpAfterSwitch && (
+                  <div className="text-[10px] font-normal text-gray-500">
+                    $0 cash — tax above still due (pay from other money)
+                  </div>
+                )}
+              </td>
+              {dividendStrategy && (
+                <td className="px-3 py-2 tabular-nums font-medium text-violet-100">
+                  {money(dividendSameYearNetCash)}
+                  {allDrpDividendPath && (
+                    <div className="text-[10px] font-normal text-gray-500">
+                      $0 cash — tax above still due
+                    </div>
+                  )}
+                </td>
+              )}
+            </tr>
+            <tr className="border-t border-gray-800/80">
+              <td className="px-3 py-2 text-gray-400">
+                Economic yield after all distribution tax
+              </td>
+              <td className="px-3 py-2 tabular-nums text-gray-100">
+                {money(economicAfterTax)}
+              </td>
+              {dividendStrategy && (
+                <td className="px-3 py-2 tabular-nums text-violet-100/90">
+                  {money(dividendEconomicAfterTax)}
+                </td>
+              )}
+            </tr>
+            {dividendStrategy && (
+              <tr className="border-t border-gray-800/80">
+                <td className="px-3 py-2 text-gray-400">
+                  Cash taken over full {report.horizonYears}y (path B only)
+                </td>
+                <td className="px-3 py-2 text-gray-500">—</td>
+                <td className="px-3 py-2 tabular-nums text-violet-100/90">
+                  {money(dividendStrategy.totalDividendsCash)}
+                  <div className="text-[10px] text-gray-500">
+                    sum of cash years 1–{report.horizonYears}
+                  </div>
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="mb-3 text-xs text-gray-500">
+        <strong className="text-gray-400">Only two paths:</strong>{" "}
+        <span className="text-sky-200/90">A = switch</span> (sell phase 1, buy
+        phase 2, estimate next year) vs{" "}
+        <span className="text-violet-200/90">B = never switched</span> (Dividend
+        strategy for the whole horizon — year {dividendSameYearNum} of the sim).
+        There is no third “held × yield” column.
+      </p>
+
+      {sleeves.length > 0 && (
+        <div className="mb-3 overflow-auto rounded-lg border border-gray-800/80">
+          <table className="w-full min-w-[560px] text-left text-xs">
+            <thead className="text-gray-500">
+              <tr>
+                <th className="px-3 py-2 font-medium">Phase 2 sleeve</th>
+                <th className="px-3 py-2 font-medium">Weight</th>
+                <th className="px-3 py-2 font-medium">Yield</th>
+                <th className="px-3 py-2 font-medium">Mode</th>
+                <th className="px-3 py-2 font-medium">Gross $/yr</th>
+                <th className="px-3 py-2 font-medium">Est. tax</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sleeves.map((s) => (
+                <tr key={s.ticker} className="border-t border-gray-800/60">
+                  <td className="px-3 py-1.5 text-gray-200">{s.ticker}</td>
+                  <td className="px-3 py-1.5 tabular-nums text-gray-400">
+                    {(s.weight * 100).toFixed(0)}%
+                  </td>
+                  <td className="px-3 py-1.5 tabular-nums text-gray-400">
+                    {s.yieldPct.toFixed(2)}%
+                    {s.frankingPct > 0 ? ` · ${s.frankingPct}% franked` : ""}
+                  </td>
+                  <td className="px-3 py-1.5 text-gray-500">
+                    {s.reinvest ? "DRP" : "cash"}
+                  </td>
+                  <td className="px-3 py-1.5 tabular-nums text-gray-200">
+                    {money(s.grossAud)}
+                  </td>
+                  <td className="px-3 py-1.5 tabular-nums text-amber-100/90">
+                    {money(Math.max(0, s.netTaxAud))}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      <p className="text-xs text-gray-500">
+        Cost base resets when you buy phase 2. Yields are your assumed rates
+        (tweak tickers above and re-run if weights changed). Switch column is
+        year‑1 after redeploy; Dividend column is{" "}
+        <strong className="text-gray-400">
+          actual sim cash in the final horizon year
+        </strong>{" "}
+        (same year you would switch). Dividend path also earned cash in earlier
+        years — see total horizon row. Not advice.
+      </p>
+    </div>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  hint,
+  emphasize,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+  emphasize?: boolean;
+}) {
+  return (
+    <div
+      className={`rounded-lg border px-3 py-2.5 ${
+        emphasize
+          ? "border-sky-800/60 bg-sky-950/40"
+          : "border-gray-800 bg-gray-900/50"
+      }`}
+    >
+      <div className="text-[11px] text-gray-500">{label}</div>
+      <div
+        className={`mt-0.5 text-base font-medium tabular-nums ${
+          emphasize ? "text-sky-100" : "text-gray-100"
+        }`}
+      >
+        {value}
+      </div>
+      {hint && <div className="mt-0.5 text-[11px] text-gray-500">{hint}</div>}
+    </div>
+  );
+}
+
+/**
+ * Collapsible year-by-year breakdown for each strategy allocation.
+ */
+function YearByYearPanel({ report }: { report: ScenarioReport }) {
+  const [open, setOpen] = useState(false);
+  const [tab, setTab] = useState(0);
+
+  useEffect(() => {
+    if (tab >= report.allocations.length) setTab(0);
+  }, [report, tab]);
+
+  const alloc: AllocationReport | undefined = report.allocations[tab];
+  const years = alloc?.years ?? [];
+
+  return (
+    <div className="mt-4 rounded-xl border border-gray-800 bg-gray-950/30">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full items-center justify-between px-4 py-3 text-left text-sm text-gray-200 hover:bg-gray-900/40"
+      >
+        <span className="font-medium">Year-by-year</span>
+        <span className="text-xs text-gray-500">{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <div className="border-t border-gray-800 px-4 py-3">
+          <div className="mb-3 flex flex-wrap gap-2">
+            {report.allocations.map((a, i) => (
+              <button
+                key={a.allocationId}
+                type="button"
+                onClick={() => setTab(i)}
+                className={`rounded-lg px-3 py-1.5 text-xs ${
+                  i === tab
+                    ? "bg-emerald-500/20 text-emerald-300"
+                    : "bg-gray-800 text-gray-400 hover:text-gray-200"
+                }`}
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
+          {years.length === 0 ? (
+            <p className="text-xs text-gray-500">
+              No year rows on this report.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[720px] text-left text-sm">
+                <thead className="text-xs uppercase tracking-wide text-gray-500">
+                  <tr>
+                    <th className="pb-2 pr-2 font-medium">Year</th>
+                    <th className="pb-2 pr-2 font-medium">End value</th>
+                    <th className="pb-2 pr-2 font-medium">Contributions</th>
+                    <th className="pb-2 pr-2 font-medium">Cash divs</th>
+                    <th className="pb-2 pr-2 font-medium">Reinvested</th>
+                    <th className="pb-2 pr-2 font-medium">Fees</th>
+                    <th className="pb-2 pr-2 font-medium">Income tax</th>
+                    <th className="pb-2 font-medium">CGT</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {years.map((y) => (
+                    <tr
+                      key={y.year}
+                      className="border-t border-gray-800/80"
+                    >
+                      <td className="py-1.5 pr-2 tabular-nums text-gray-300">
+                        {y.year}
+                      </td>
+                      <td className="py-1.5 pr-2 tabular-nums text-gray-100">
+                        {money(y.endValue)}
+                      </td>
+                      <td className="py-1.5 pr-2 tabular-nums text-gray-300">
+                        {money(y.contributions)}
+                      </td>
+                      <td className="py-1.5 pr-2 tabular-nums text-gray-300">
+                        {money(y.dividendsCash)}
+                      </td>
+                      <td className="py-1.5 pr-2 tabular-nums text-gray-300">
+                        {money(y.dividendsReinvested)}
+                      </td>
+                      <td className="py-1.5 pr-2 tabular-nums text-gray-400">
+                        {money(y.fees)}
+                      </td>
+                      <td className="py-1.5 pr-2 tabular-nums text-amber-100/90">
+                        {money(y.incomeTax)}
+                      </td>
+                      <td className="py-1.5 tabular-nums text-amber-100/90">
+                        {money(y.cgtTax)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+          <p className="mt-2 text-xs text-gray-500">
+            Annual totals from the simulation (estimates only). CGT here is
+            in-horizon (e.g. drawdown); exit CGT at liquidation is in the
+            summary table above.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ResultsTable({
+  report,
+  emphasizeTax,
+}: {
+  report: ScenarioReport;
+  emphasizeTax?: boolean;
+}) {
+  return (
+    <div className="overflow-auto rounded-lg border border-gray-800">
+      <table className="w-full min-w-[720px] text-left text-sm">
+        <thead className="bg-gray-900 text-xs uppercase tracking-wide text-gray-500">
+          <tr>
+            <th className="px-3 py-2.5 font-medium">Metric</th>
+            {report.allocations.map((a) => (
+              <th
+                key={a.allocationId}
+                className="px-3 py-2.5 font-medium text-emerald-300/90"
+              >
+                {a.label}
+                <div className="mt-0.5 text-[10px] font-normal normal-case text-gray-500">
+                  {a.exit
+                    ? a.exit.type === "hold"
+                      ? "exit: hold"
+                      : a.exit.type === "drawdown"
+                        ? `exit: drawdown ${((a.exit.annualRate || 0) * 100).toFixed(0)}%`
+                        : "exit: sell"
+                    : ""}
+                </div>
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          <MetricRow
+            label="Capital you put in (start + contributions)"
+            values={report.allocations.map((a) =>
+              money(a.totalCapitalIn ?? a.totalContributions),
+            )}
+          />
+          <MetricRow
+            label="Portfolio value only (capital — before exit CGT)"
+            values={report.allocations.map((a) => money(a.finalValue))}
+          />
+          <MetricRow
+            label="Cash dividends taken out (not in portfolio value)"
+            values={report.allocations.map((a) => money(a.totalDividendsCash))}
+          />
+          <MetricRow
+            label="Total wealth before exit CGT (portfolio + cash divs)"
+            values={report.allocations.map((a) =>
+              money(
+                a.totalWealthBeforeExitCgt ??
+                  a.finalValue + a.totalDividendsCash,
+              ),
+            )}
+            emphasize
+          />
+          {emphasizeTax && (
+            <>
+              <MetricRow
+                label="Income tax along the way (divs)"
+                values={report.allocations.map((a) => money(a.totalIncomeTax))}
+                highlight="amber"
+              />
+              <MetricRow
+                label="Capital gain if you sell (value − cost)"
+                values={report.allocations.map((a) =>
+                  money(a.exitCapitalGain ?? 0),
+                )}
+                highlight="amber"
+              />
+              <MetricRow
+                label="Exit CGT if you sell"
+                values={report.allocations.map((a) =>
+                  money(a.exitCgtTax ?? a.totalCgtTax),
+                )}
+                highlight="amber"
+              />
+              <MetricRow
+                label="Total tax (income + CGT)"
+                values={report.allocations.map((a) =>
+                  money(a.totalIncomeTax + a.totalCgtTax),
+                )}
+                highlight="amber"
+              />
+            </>
+          )}
+          <MetricRow
+            label="Portfolio cash after exit CGT (excludes cash divs already taken)"
+            values={report.allocations.map((a) => money(a.netIfLiquidated))}
+          />
+          <MetricRow
+            label="Net gain after tax (portfolio+cash divs − capital in − taxes)"
+            values={report.allocations.map((a) =>
+              money(
+                a.netGainAfterTax ??
+                  a.netIfLiquidated +
+                    a.totalDividendsCash -
+                    (a.totalCapitalIn ?? a.totalContributions) -
+                    a.totalIncomeTax,
+              ),
+            )}
+            emphasize
+          />
+          <MetricRow
+            label="Dividends reinvested (already inside portfolio value)"
+            values={report.allocations.map((a) =>
+              money(a.totalDividendsReinvested),
+            )}
+          />
+          <MetricRow
+            label="Fees"
+            values={report.allocations.map((a) => money(a.totalFees))}
+          />
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function Field({
+  label,
+  children,
+}: {
+  label: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <label className="block text-sm">
+      <span className="mb-1 block text-xs text-gray-500">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function MetricRow({
+  label,
+  values,
+  emphasize,
+  highlight,
+}: {
+  label: string;
+  values: string[];
+  emphasize?: boolean;
+  highlight?: "amber";
+}) {
+  return (
+    <tr
+      className={`border-t border-gray-800/80 ${
+        emphasize
+          ? "bg-emerald-500/5"
+          : highlight === "amber"
+            ? "bg-amber-500/5"
+            : ""
+      }`}
+    >
+      <td className="px-3 py-2 text-gray-400">{label}</td>
+      {values.map((v, i) => (
+        <td
+          key={i}
+          className={`px-3 py-2 tabular-nums ${
+            emphasize
+              ? "font-medium text-emerald-200"
+              : highlight === "amber"
+                ? "text-amber-100"
+                : "text-gray-100"
+          }`}
+        >
+          {v}
+        </td>
+      ))}
+    </tr>
+  );
+}

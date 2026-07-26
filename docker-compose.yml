@@ -1,0 +1,22 @@
+# Yields — single API container serves JSON + built web UI on :8787
+# SQLite persists on the yields-data volume.
+#
+#   docker compose up --build
+#   open http://localhost:8787
+#
+# Local dev (hot reload): pnpm dev — web on :5173, API on :8787 (Vite proxies /api).
+services:
+  api:
+    build: .
+    ports:
+      - "8787:8787"
+    environment:
+      YIELDS_DB_PATH: /data/yields.db
+      PORT: "8787"
+      SERVE_WEB: "1"
+      NODE_ENV: production
+    volumes:
+      - yields-data:/data
+
+volumes:
+  yields-data:

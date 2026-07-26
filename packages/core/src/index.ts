@@ -1,0 +1,23 @@
+export * from "./types.js";
+export * from "./market.js";
+export * from "./holdings.js";
+export * from "./performance.js";
+export * from "./csv.js";
+export * from "./yahoo.js";
+export * from "./income.js";
+export * from "./drpCheck.js";
+export * from "./parse/index.js";
+export { parseSharesightPaste } from "./parse/sharesightPaste.js";
+
+// Phase 3 — tax foundation
+export * from "./tax/types.js";
+export * from "./tax/cgt.js";
+export * from "./tax/incomeTax.js";
+
+// Phase 4 — planner engine
+export * from "./planner/types.js";
+export * from "./planner/engine.js";
+
+// Instrument assumptions (BetaShares / Vanguard seed + optional Yahoo refresh)
+export * from "./instruments/seed.js";
+export * from "./instruments/resolve.js";
