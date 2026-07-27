@@ -19,7 +19,7 @@ RUN pnpm --filter @yields/core build \
 
 FROM base AS runtime
 ENV NODE_ENV=production
-ENV YIELDS_DB_PATH=/data/yields.db
+ENV YIELDS_DB_PATH=/data/risu.db
 ENV PORT=8787
 # API serves apps/web/dist when present (see apps/api/src/index.ts)
 ENV SERVE_WEB=1
