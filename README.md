@@ -12,13 +12,16 @@ Everything stays **on your computer**. No sign-up, no uploading your broker hist
 
 ## Why Risu?
 
-Broker apps show today’s balance. Spreadsheets rot. Sharesight is great at history — but you may still want a simple place to:
+Broker apps show today’s balance. Spreadsheets go stale and break. Paid trackers often cap portfolios, tickers, or history — or lock your data in their cloud.
 
-- See **cost vs what it’s worth** in **Australian dollars**
-- Keep **you / partner / SMSF** books separate without juggling five logins
-- Think about **new money after the Jul 2027 CGT changes** (estimates only)
+Risu is **free and open source**. Your book lives in a **local SQLite file on your machine**: one portable database you can **back up, copy, and restore** (dated backups in a click). Move machines, keep archives, own the file — no subscription gate on “export.”
 
-Risu is that local notebook: import once, refresh prices when you choose, plan with assumptions you control.
+- **No artificial limits** — as many portfolios, transactions, and stocks as you need (disk space is the practical ceiling)
+- **Private by default** — no account, no uploading your history to a third-party SaaS
+- **AUD-first view** of ASX and overseas holdings (cost vs market value over time)
+- **Planning mode built around Australian tax framing** — especially **new money** after the **Jul 2027 CGT** changes (indexed cost-style thinking, estimates only — not a tax return)
+
+Import your trades, refresh prices when you choose, and run “what if?” scenarios with assumptions you control.
 
 ---
 
