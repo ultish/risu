@@ -2,7 +2,8 @@ import type { CgtRegime, TaxProfile } from "../tax/types.js";
 
 /**
  * Single sleeve / instrument assumptions inside a scenario allocation.
- * All rates are annual decimals (e.g. 0.07 = 7%).
+ * All rates are **effective annual** decimals (e.g. 0.07 = 7% p.a.).
+ * The engine converts to monthly via (1+r)^(1/12)−1 so twelve steps recover r.
  */
 export type AssetAssumption = {
   /** Optional label, e.g. "AU equity growth" */
@@ -11,11 +12,11 @@ export type AssetAssumption = {
   ticker?: string;
   /** Weight within allocation (0–1); weights should sum ≈ 1 */
   weight: number;
-  /** Expected capital growth p.a. (before MER) */
+  /** Expected capital growth effective p.a. (before MER) */
   growthRate: number;
-  /** Expected cash yield p.a. */
+  /** Expected cash yield effective p.a. */
   yieldRate: number;
-  /** MER / management fee p.a. as decimal drag on AUM */
+  /** MER / management fee effective p.a. as decimal drag on AUM */
   mer: number;
   /** Franking on yield portion (0–100); 0 for foreign / unfranked */
   frankingPercent?: number;

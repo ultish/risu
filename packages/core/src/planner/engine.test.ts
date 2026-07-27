@@ -44,8 +44,10 @@ function baseScenario(overrides: Partial<Scenario> = {}): Scenario {
 
 describe("planner engine DRP / income tax", () => {
   it("reinvests full gross yield (tax paid outside) and still accrues income tax", () => {
-    // Zero growth, 12% annual yield → 1% per month on starting 10_000
-    // Month 1: div = 100; full reinvest → value 10_100; tax on 100 @ 39% = 39
+    // Zero growth, 12% effective annual yield → monthly = (1.12)^(1/12)−1
+    // Month 1: div ≈ 94.87 on 10_000; full reinvest; tax @ 39%
+    const monthlyY = Math.pow(1.12, 1 / 12) - 1;
+    const div = 10_000 * monthlyY;
     const r = runScenario(
       baseScenario({
         initialValueAud: 10_000,
@@ -72,19 +74,20 @@ describe("planner engine DRP / income tax", () => {
       }),
     );
     const a = r.allocations[0]!;
-    expect(a.totalDividendsReinvested).toBeCloseTo(100, 0);
-    // Full reinvest: final value ≈ 10_000 + 100
-    expect(a.finalValue).toBeCloseTo(10_100, 0);
-    expect(a.totalIncomeTax).toBeCloseTo(39, 0);
+    expect(a.totalDividendsReinvested).toBeCloseTo(div, 1);
+    expect(a.finalValue).toBeCloseTo(10_000 + div, 1);
+    expect(a.totalIncomeTax).toBeCloseTo(div * 0.39, 1);
   });
 
   it("applies franking refund (negative net tax) instead of clamping to zero", () => {
-    // Fully franked: $70 cash → credits 30; at MTR 0 (no medicare) net tax = -30
+    // Fully franked cash div → refundable credits; MTR 0, medicare 0
     const low: typeof profile = {
       label: "Low",
       marginalRate: 0,
       medicareLevy: 0,
     };
+    const monthlyY = Math.pow(1.12, 1 / 12) - 1;
+    const div = 7_000 * monthlyY;
     const r = runScenario(
       baseScenario({
         taxProfile: low,
@@ -100,7 +103,7 @@ describe("planner engine DRP / income tax", () => {
                 label: "AU",
                 weight: 1,
                 growthRate: 0,
-                yieldRate: 0.12, // 1%/mo → 70 on 7000
+                yieldRate: 0.12,
                 mer: 0,
                 frankingPercent: 100,
                 reinvestDividends: true,
@@ -112,9 +115,39 @@ describe("planner engine DRP / income tax", () => {
       }),
     );
     const a = r.allocations[0]!;
-    expect(a.totalDividendsReinvested).toBeCloseTo(70, 0);
+    expect(a.totalDividendsReinvested).toBeCloseTo(div, 1);
     expect(a.totalIncomeTax).toBeLessThan(0);
-    expect(a.finalValue).toBeCloseTo(7_070, 0);
+    expect(a.finalValue).toBeCloseTo(7_000 + div, 1);
+  });
+
+  it("12 months of growth alone recovers effective annual rate", () => {
+    const r = runScenario(
+      baseScenario({
+        initialValueAud: 10_000,
+        monthlyContributionAud: 0,
+        horizonYears: 1,
+        allocations: [
+          {
+            id: "one",
+            label: "One",
+            assets: [
+              {
+                label: "EQ",
+                weight: 1,
+                growthRate: 0.08,
+                yieldRate: 0,
+                mer: 0,
+                frankingPercent: 0,
+                reinvestDividends: true,
+              },
+            ],
+            exit: { type: "hold" },
+          },
+        ],
+      }),
+    );
+    // (1.08) effective: no yield/MER/tax drag on capital path
+    expect(r.allocations[0]!.finalValue).toBeCloseTo(10_000 * 1.08, 0);
   });
 });
 

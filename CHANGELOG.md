@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to **Yields** are documented in this file.
+All notable changes to **Risu** are documented in this file.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -14,6 +14,8 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 - **Daily FX history cache** (`fx_history`): ~10y `AUDUSD=X` (etc.) from Yahoo chart or Frankfurter range; performance chart uses as-of rates; latest still in `fx_cache`; paste `AUDUSD=X` chart also fills history
 
 ### Changed
+- **Planner rates** are **effective annual**: monthly step is \((1+r)^{1/12}-1\) (not \(r/12\)), so growth/yield/MER/CPI match the % you type over a year
+- **README** rewritten (intro, features, install, dev) with Risu logo; **PLAN.md** removed
 - **Nav URLs**: main tabs (and import/tax sub-modes) sync to query params — e.g. `?tab=planner`, `?tab=import&import=paste`, `?tab=tax&tax=drp` (copyable; browser back works)
 - **Product name: Risu** (りす) — UI title, favicon/icon, console `risu.*` (legacy `yields.*` alias), backup `risu-YYYY-MM-DD.db`
 - **Backup DB** download filename is `risu-YYYY-MM-DD.db` (UTC date)

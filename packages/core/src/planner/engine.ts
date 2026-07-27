@@ -4,8 +4,8 @@
  * Each month per allocation sleeve:
  * 0. (Post–2027) Inflate cost base by assumed CPI (indexation)
  * 1. Contribution (+ optional brokerage fee)
- * 2. Capital growth only (monthly compound of annual growthRate)
- * 3. Yield on capital (monthly of annual yieldRate):
+ * 2. Capital growth only (monthly compound of effective annual growthRate)
+ * 3. Yield on capital (monthly of effective annual yieldRate):
  *    - always taxed as dividend income (even when reinvested / DRP)
  *    - cash: yield tracked outside capital (value/cost base unchanged)
  *    - reinvest (DRP): **full** gross yield added to value and cost base;
@@ -507,8 +507,15 @@ function buildContributionSchedule(
   return out;
 }
 
+/**
+ * Convert an effective annual rate to a monthly rate such that
+ * (1 + monthly)^12 − 1 = annual (for annual > −1).
+ * Prefer this over annual/12, which overstates multi-month compounding.
+ */
 function monthlyRate(annual: number): number {
-  return annual / MONTHS;
+  if (!Number.isFinite(annual) || annual === 0) return 0;
+  if (annual <= -1) return -1 + 1e-12; // avoid domain error; floor near −100%
+  return Math.pow(1 + annual, 1 / MONTHS) - 1;
 }
 
 function todayIso(): string {
