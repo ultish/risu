@@ -8,6 +8,7 @@ import { isYahooHttpError } from "@yields/core";
 
 const KEY_BLOCKED_UNTIL = "yahoo_blocked_until";
 const KEY_LAST_ERROR = "yahoo_last_error";
+const KEY_LAST_URL = "yahoo_last_url";
 const KEY_LAST_OK = "yahoo_last_ok_at";
 const KEY_STREAK = "yahoo_429_streak";
 const KEY_LAST_REFRESH = "yahoo_last_refresh_at";
@@ -20,6 +21,8 @@ export type YahooStatus = {
   /** Seconds remaining (0 if ok) */
   waitSeconds: number;
   lastError: string | null;
+  /** Last Yahoo URL that failed (open in browser; paste JSON via Settings / console) */
+  lastUrl: string | null;
   lastOkAt: string | null;
   lastRefreshAt: string | null;
   streak429: number;
@@ -51,11 +54,12 @@ function parseIsoMs(raw: string | null): number | null {
 
 /** Default cool-downs when Retry-After is missing (seconds). */
 function heuristicCooldownSeconds(streak: number): number {
-  // escalate: 15m → 1h → 3h → 6h (cap)
-  if (streak <= 1) return 15 * 60;
-  if (streak === 2) return 60 * 60;
-  if (streak === 3) return 3 * 60 * 60;
-  return 6 * 60 * 60;
+  // Long floors — short cooldowns cause thrashing while IP is still banned
+  // escalate: 1h → 3h → 6h → 12h (cap)
+  if (streak <= 1) return 60 * 60;
+  if (streak === 2) return 3 * 60 * 60;
+  if (streak === 3) return 6 * 60 * 60;
+  return 12 * 60 * 60;
 }
 
 export function getYahooStatus(db: Database.Database): YahooStatus {
@@ -72,6 +76,7 @@ export function getYahooStatus(db: Database.Database): YahooStatus {
   const cooling = waitSeconds > 0;
   const streak429 = Number(getSetting(db, KEY_STREAK) || "0") || 0;
   const lastError = getSetting(db, KEY_LAST_ERROR);
+  const lastUrl = getSetting(db, KEY_LAST_URL);
   const lastOkAt = getSetting(db, KEY_LAST_OK);
   const lastRefreshAt = getSetting(db, KEY_LAST_REFRESH);
 
@@ -88,8 +93,9 @@ export function getYahooStatus(db: Database.Database): YahooStatus {
     state = "cooling";
     label = `Yahoo cool-down · ${formatWait(waitSeconds)}`;
     note =
-      lastError ||
-      "Rate-limited recently. Wait before Refresh — Yahoo rarely sends an exact timer.";
+      (lastError ? `${lastError} ` : "") +
+      "Refresh still works via ASX/Nasdaq/FX fallbacks — only Yahoo is paused. " +
+      "Open lastUrl in a browser, copy JSON, paste via Settings or risu.importYahoo(...).";
   } else if (!enabled) {
     state = "ok";
     label = "Yahoo manual only";
@@ -102,6 +108,7 @@ export function getYahooStatus(db: Database.Database): YahooStatus {
     blockedUntil: cooling ? blockedUntil : null,
     waitSeconds,
     lastError,
+    lastUrl,
     lastOkAt,
     lastRefreshAt,
     streak429,
@@ -145,6 +152,7 @@ export function recordYahooSuccess(db: Database.Database) {
   // Clear cool-down on success
   setSetting(db, KEY_BLOCKED_UNTIL, "");
   setSetting(db, KEY_LAST_ERROR, "");
+  setSetting(db, KEY_LAST_URL, "");
 }
 
 export function recordYahooRefreshStarted(db: Database.Database) {
@@ -153,7 +161,14 @@ export function recordYahooRefreshStarted(db: Database.Database) {
 
 export function recordYahooFailure(db: Database.Database, err: unknown) {
   const msg = err instanceof Error ? err.message : String(err);
-  setSetting(db, KEY_LAST_ERROR, msg.slice(0, 500));
+  setSetting(db, KEY_LAST_ERROR, msg.slice(0, 800));
+  if (isYahooHttpError(err) && err.url) {
+    setSetting(db, KEY_LAST_URL, err.url.slice(0, 1000));
+  } else {
+    // Best-effort: scrape " URL: …" suffix from message
+    const m = msg.match(/\bURL:\s*(\S+)/);
+    if (m?.[1]) setSetting(db, KEY_LAST_URL, m[1].slice(0, 1000));
+  }
 
   const is429 =
     isYahooHttpError(err)
@@ -168,9 +183,11 @@ export function recordYahooFailure(db: Database.Database, err: unknown) {
 
   let seconds = heuristicCooldownSeconds(streak);
   if (isYahooHttpError(err) && err.retryAfterSeconds != null) {
-    // Trust header but floor at 5 min so we don't thrash on tiny values
-    seconds = Math.max(err.retryAfterSeconds, 5 * 60);
+    // Trust header but floor at 30 min — Yahoo bans are rarely short
+    seconds = Math.max(err.retryAfterSeconds, 30 * 60);
   }
+  // Never shorter than heuristic for this streak
+  seconds = Math.max(seconds, heuristicCooldownSeconds(streak));
 
   const until = new Date(Date.now() + seconds * 1000).toISOString();
   setSetting(db, KEY_BLOCKED_UNTIL, until);
@@ -181,4 +198,5 @@ export function clearYahooCooldown(db: Database.Database) {
   setSetting(db, KEY_BLOCKED_UNTIL, "");
   setSetting(db, KEY_STREAK, "0");
   setSetting(db, KEY_LAST_ERROR, "");
+  setSetting(db, KEY_LAST_URL, "");
 }

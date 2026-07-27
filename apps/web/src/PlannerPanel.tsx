@@ -417,6 +417,8 @@ export function PlannerPanel() {
   const [hydrated, setHydrated] = useState(false);
 
   const [report, setReport] = useState<ScenarioReport | null>(null);
+  /** Horizon+1 run so switch table can compare both paths at end of year N+1 */
+  const [reportPlus1, setReportPlus1] = useState<ScenarioReport | null>(null);
   const [reportOldCgt, setReportOldCgt] = useState<ScenarioReport | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -523,6 +525,7 @@ export function PlannerPanel() {
     setActiveAlloc(0);
     setSeedNote(null);
     setReport(null);
+    setReportPlus1(null);
     setReportOldCgt(null);
     setDraftSavedAt(null);
     // Reload templates as fresh allocations
@@ -762,6 +765,15 @@ export function PlannerPanel() {
 
       const result = await runPlanner({ ...base, cgtRegime });
       setReport(result);
+
+      // Extra year so switch table can show Path B at end of year (horizon+1)
+      const resultPlus1 = await runPlanner({
+        ...base,
+        horizonYears: horizonYears + 1,
+        name: "Horizon+1 for switch year N+1 compare",
+        cgtRegime,
+      });
+      setReportPlus1(resultPlus1);
 
       if (compareOldCgt && cgtRegime !== "discount_50") {
         const old = await runPlanner({
@@ -1556,8 +1568,11 @@ export function PlannerPanel() {
 
           <SwitchIncomePanel
             report={report}
+            reportPlus1={reportPlus1}
             allocations={allocations}
             taxProfile={selectedProfile}
+            monthlyContribution={monthlyContribution}
+            inflationPct={inflationPct}
           />
 
           {reportOldCgt && (
@@ -1716,43 +1731,112 @@ function estimateDivTaxRough(
   };
 }
 
-type TargetYieldBreakdown = {
-  ticker: string;
-  weight: number;
-  yieldPct: number;
-  frankingPct: number;
-  reinvest: boolean;
-  /** Gross $ on redeployed capital */
-  grossAud: number;
-  /** Net tax on this sleeve's gross */
-  netTaxAud: number;
-};
-
-function blendedTargetYield(target: UiAllocation, redeployAud: number) {
-  const rows = target.assets.filter((a) => a.ticker.trim());
-  const weightSum = rows.reduce((s, a) => s + Math.max(0, a.weightPct), 0) || 1;
-  const sleeves: TargetYieldBreakdown[] = rows.map((a) => {
+/**
+ * One year (12 months) of the planner engine on a fixed pile — same growth /
+ * yield / MER / DRP / contribution rules as packages/core planner.
+ * Used for switch Path A year (horizon+1) after redeploy.
+ */
+function simulateOneYearOnPile(input: {
+  startValue: number;
+  startCostBase: number;
+  assets: UiAsset[];
+  monthlyContribution: number;
+  marginalRate: number;
+  medicareLevy: number;
+  inflationAnnual?: number;
+}): {
+  endValue: number;
+  endCostBase: number;
+  dividendsCash: number;
+  dividendsReinvested: number;
+  incomeTax: number;
+  fees: number;
+  contributions: number;
+} {
+  const rows = input.assets.filter((a) => a.ticker.trim());
+  const weightSum =
+    rows.reduce((s, a) => s + Math.max(0, a.weightPct), 0) || 1;
+  const sleeves = rows.map((a) => {
     const w = Math.max(0, a.weightPct) / weightSum;
-    const y = Math.max(0, a.yieldPct) / 100;
-    const grossAud = redeployAud * w * y;
     return {
-      ticker: a.ticker.trim().toUpperCase(),
       weight: w,
-      yieldPct: a.yieldPct,
-      frankingPct: a.frankingPct,
+      growth: Math.max(0, a.growthPct) / 100 / 12,
+      yield: Math.max(0, a.yieldPct) / 100 / 12,
+      mer: Math.max(0, a.merPct) / 100 / 12,
+      franking: a.frankingPct,
       reinvest: a.reinvest,
-      grossAud,
-      netTaxAud: 0, // filled by caller with tax profile
+      value: input.startValue * w,
+      costBase: input.startCostBase * w,
     };
   });
-  const totalYieldPct = sleeves.reduce((s, x) => s + x.weight * x.yieldPct, 0);
-  const cashYieldPct = sleeves
-    .filter((x) => !x.reinvest)
-    .reduce((s, x) => s + x.weight * x.yieldPct, 0);
-  const reinvestYieldPct = sleeves
-    .filter((x) => x.reinvest)
-    .reduce((s, x) => s + x.weight * x.yieldPct, 0);
-  return { sleeves, totalYieldPct, cashYieldPct, reinvestYieldPct };
+  if (!sleeves.length) {
+    return {
+      endValue: input.startValue,
+      endCostBase: input.startCostBase,
+      dividendsCash: 0,
+      dividendsReinvested: 0,
+      incomeTax: 0,
+      fees: 0,
+      contributions: 0,
+    };
+  }
+
+  const infM = Math.max(0, input.inflationAnnual ?? 0) / 12;
+  let dividendsCash = 0;
+  let dividendsReinvested = 0;
+  let incomeTax = 0;
+  let fees = 0;
+  let contributions = 0;
+  const contrib = Math.max(0, input.monthlyContribution);
+
+  for (let m = 0; m < 12; m++) {
+    if (infM > 0) {
+      for (const s of sleeves) s.costBase *= 1 + infM;
+    }
+    if (contrib > 0) {
+      contributions += contrib;
+      for (const s of sleeves) {
+        const add = contrib * s.weight;
+        s.value += add;
+        s.costBase += add;
+      }
+    }
+    for (const s of sleeves) {
+      s.value *= 1 + s.growth;
+      const div = s.value * s.yield;
+      if (div > 0) {
+        const tax = estimateDivTaxRough(
+          div,
+          s.franking,
+          input.marginalRate,
+          input.medicareLevy,
+        );
+        incomeTax += tax.netTax;
+        if (s.reinvest) {
+          s.value += div;
+          s.costBase += div;
+          dividendsReinvested += div;
+        } else {
+          dividendsCash += div;
+        }
+      }
+      const fee = s.value * s.mer;
+      s.value = Math.max(0, s.value - fee);
+      fees += fee;
+    }
+  }
+
+  const endValue = sleeves.reduce((s, x) => s + x.value, 0);
+  const endCostBase = sleeves.reduce((s, x) => s + x.costBase, 0);
+  return {
+    endValue,
+    endCostBase,
+    dividendsCash,
+    dividendsReinvested,
+    incomeTax,
+    fees,
+    contributions,
+  };
 }
 
 /**
@@ -1810,19 +1894,28 @@ function switchSaleProceeds(
 }
 
 /**
- * Phase-2 income after accumulating in one strategy, selling, then buying another.
- * Pure UI estimate from the last run + current ticker assumptions.
- * Redeploys net of one sale CGT: from main sim if exit was sell, else estimated.
+ * Switch compare: both paths at **end of year (horizon+1)**.
+ * A: Growth (or source) for N years → sell → Dividend for year N+1 (engine-style sim).
+ * B: Always Dividend for N+1 years (from reportPlus1).
  */
 function SwitchIncomePanel({
   report,
+  reportPlus1,
   allocations,
   taxProfile,
+  monthlyContribution,
+  inflationPct,
 }: {
   report: ScenarioReport;
+  reportPlus1: ScenarioReport | null;
   allocations: UiAllocation[];
   taxProfile?: TaxProfileDto | null;
+  monthlyContribution: number;
+  inflationPct: number;
 }) {
+  const yearN = report.horizonYears;
+  const yearN1 = yearN + 1;
+
   const byId = (id: string) =>
     report.allocations.find((a) => a.allocationId === id) ??
     report.allocations[0];
@@ -1908,7 +2001,7 @@ function SwitchIncomePanel({
     return null;
   }
 
-  // One sale CGT only: already in main sim if exit = sell; else estimate for hold
+  // Sale at end of year N (from N-year report)
   const sale = switchSaleProceeds(source, report, taxProfile);
   const portfolioGross = source.finalValue ?? 0;
   const cgtOnSwitch = sale.cgtTax;
@@ -1917,113 +2010,67 @@ function SwitchIncomePanel({
   const redeploy =
     portfolioAfterCgt + (includeCashDivs ? cashDivs : 0);
 
-  const blend = blendedTargetYield(targetUi, redeploy);
   const mtr = taxProfile?.marginalRate ?? 0.37;
   const med = taxProfile?.medicareLevy ?? 0.02;
 
-  let grossCash = 0;
-  let grossReinvest = 0;
-  let taxOnCash = 0;
-  let taxOnReinvest = 0;
-  const sleeves = blend.sleeves.map((s) => {
-    const tax = estimateDivTaxRough(s.grossAud, s.frankingPct, mtr, med);
-    if (s.reinvest) {
-      grossReinvest += s.grossAud;
-      taxOnReinvest += Math.max(0, tax.netTax);
-    } else {
-      grossCash += s.grossAud;
-      taxOnCash += Math.max(0, tax.netTax);
-    }
-    return { ...s, netTaxAud: tax.netTax };
+  // Path A year N+1: full monthly sim on redeployed capital (same engine rules)
+  const pathA = simulateOneYearOnPile({
+    startValue: redeploy,
+    startCostBase: redeploy,
+    assets: targetUi.assets,
+    monthlyContribution,
+    marginalRate: mtr,
+    medicareLevy: med,
+    inflationAnnual:
+      report.cgtRegime === "indexation_min30"
+        ? Math.max(0, inflationPct) / 100
+        : 0,
   });
 
-  const grossTotal = grossCash + grossReinvest;
-  /** AU: DRP distributions are still assessable — tax on cash + DRP */
-  const taxOnAllDistributions = taxOnCash + taxOnReinvest;
-  const netCashInHand = grossCash - taxOnCash;
-  // If all DRP, tax is still due (paid from other cash / smaller reinvestment)
-  const economicAfterTax = grossTotal - taxOnAllDistributions;
+  const aCash = pathA.dividendsCash;
+  const aDrp = pathA.dividendsReinvested;
+  const aYield = aCash + aDrp;
+  const aTax = pathA.incomeTax;
+  const aNetCash = aCash - Math.max(0, aTax * (aCash > 0 && aDrp <= 0 ? 1 : aCash / (aYield || 1)));
+  // Economic yield after tax: total yield − full income tax (cash + DRP)
+  const aEconomic = aYield - aTax;
+  const aEndCapital = pathA.endValue;
+  const allDrpAfterSwitch = aCash <= 0 && aDrp > 0;
 
-  // Stay-in-Dividend path: year-by-year sim final year + tax on full yield
+  // Path B: always in target (dividend) for N+1 years — year N+1 row from plus1 report
   const dividendStrategy =
-    report.allocations.find(
+    (reportPlus1 ?? report).allocations.find(
       (a) =>
+        a.allocationId === targetId ||
         a.allocationId === "dividend" ||
-        a.label.toLowerCase().includes("dividend"),
+        a.label.toLowerCase().includes("dividend") ||
+        a.label === targetReport.label,
     ) ?? null;
-  const divYears = dividendStrategy?.years ?? [];
-  const lastDivYear = divYears.length
-    ? divYears[divYears.length - 1]!
-    : null;
-  const dividendSameYearCash = lastDivYear?.dividendsCash ?? 0;
-  const dividendSameYearReinv = lastDivYear?.dividendsReinvested ?? 0;
-  const dividendSameYearTotal =
-    dividendSameYearCash + dividendSameYearReinv;
-  const dividendSameYearNum = lastDivYear?.year ?? report.horizonYears;
-  // Prefer sim's income tax for that year when present (engine taxes DRP too)
-  const simYearIncomeTax = lastDivYear?.incomeTax ?? null;
-  const dividendUi =
-    allocations.find(
-      (a) =>
-        a.id === dividendStrategy?.allocationId ||
-        a.label === dividendStrategy?.label,
-    ) ?? null;
-
-  /** Tax all distributions (cash + DRP) by sleeve — mirrors path A */
-  let dividendSameYearTaxCash = 0;
-  let dividendSameYearTaxDrp = 0;
-  if (dividendUi && dividendSameYearTotal > 0) {
-    const rows = dividendUi.assets.filter((x) => x.ticker.trim());
-    const wSum = rows.reduce((s, x) => s + Math.max(0, x.weightPct), 0) || 1;
-    for (const s of rows) {
-      const w = Math.max(0, s.weightPct) / wSum;
-      const y = Math.max(0, s.yieldPct);
-      // Split this sleeve's share of year yield by cash vs DRP mode
-      const sleeveGross = dividendSameYearTotal * w;
-      // Prefer weight×yield share if yields set
-      const ySum = rows.reduce(
-        (acc, r) => acc + Math.max(0, r.weightPct) * Math.max(0, r.yieldPct),
-        0,
-      );
-      const sleeveShare =
-        ySum > 0
-          ? (Math.max(0, s.weightPct) * y) / ySum
-          : w;
-      const sleeveAud = dividendSameYearTotal * sleeveShare;
-      const tax = estimateDivTaxRough(
-        sleeveAud,
-        s.frankingPct,
-        mtr,
-        med,
-      );
-      if (s.reinvest) dividendSameYearTaxDrp += Math.max(0, tax.netTax);
-      else dividendSameYearTaxCash += Math.max(0, tax.netTax);
-      void sleeveGross;
-    }
-  } else if (dividendSameYearTotal > 0) {
-    const tax = estimateDivTaxRough(dividendSameYearTotal, 70, mtr, med);
-    if (dividendSameYearCash > 0 && dividendSameYearReinv <= 0) {
-      dividendSameYearTaxCash = Math.max(0, tax.netTax);
-    } else if (dividendSameYearCash <= 0) {
-      dividendSameYearTaxDrp = Math.max(0, tax.netTax);
-    } else {
-      const cashFrac = dividendSameYearCash / dividendSameYearTotal;
-      dividendSameYearTaxCash = Math.max(0, tax.netTax * cashFrac);
-      dividendSameYearTaxDrp = Math.max(0, tax.netTax * (1 - cashFrac));
-    }
-  }
-  // Prefer engine year tax when available (already includes franking model)
-  const dividendSameYearTaxAll =
-    simYearIncomeTax != null && simYearIncomeTax > 0
-      ? simYearIncomeTax
-      : dividendSameYearTaxCash + dividendSameYearTaxDrp;
-  const dividendSameYearNetCash =
-    dividendSameYearCash - dividendSameYearTaxCash;
-  const dividendEconomicAfterTax =
-    dividendSameYearTotal - dividendSameYearTaxAll;
-  const allDrpAfterSwitch = grossCash <= 0 && grossReinvest > 0;
-  const allDrpDividendPath =
-    dividendSameYearCash <= 0 && dividendSameYearReinv > 0;
+  const bYearRow =
+    dividendStrategy?.years.find((y) => y.year === yearN1) ??
+    dividendStrategy?.years[dividendStrategy.years.length - 1] ??
+    null;
+  const bCash = bYearRow?.dividendsCash ?? 0;
+  const bDrp = bYearRow?.dividendsReinvested ?? 0;
+  const bYield = bCash + bDrp;
+  const bTax = bYearRow?.incomeTax ?? 0;
+  const bEndCapital = dividendStrategy?.finalValue ?? 0;
+  const bNetCash = bCash; // cash portion; tax still due on DRP from other money
+  const bEconomic = bYield - bTax;
+  const allDrpDividendPath = bCash <= 0 && bDrp > 0;
+  // For cash-in-hand after tax on cash only (proportional when mixed)
+  const aCashInHand =
+    aCash <= 0
+      ? 0
+      : aCash -
+        (aYield > 0 ? Math.max(0, aTax) * (aCash / aYield) : 0);
+  const bCashInHand =
+    bCash <= 0
+      ? 0
+      : bCash -
+        (bYield > 0 ? Math.max(0, bTax) * (bCash / bYield) : 0);
+  void aNetCash;
+  void bNetCash;
 
   const strategyHint = (label: string) => {
     const l = label.toLowerCase();
@@ -2039,15 +2086,21 @@ function SwitchIncomePanel({
         Switch at end · choose strategies
       </h3>
       <p className="mb-4 text-xs text-gray-500">
-        After phase‑1 you{" "}
-        <strong className="text-gray-400">sell everything</strong> (CGT on the
-        old holding, indexed cost from phase‑1) then{" "}
-        <strong className="text-gray-400">buy phase‑2 as a new purchase</strong>.
-        Phase‑2 cost base = net proceeds (indexation clock restarts at zero
-        history — not the old indexed base). Year‑1 income is yield on that
-        new pile only. If phase‑1 exit was Sell, sale CGT is reused from the
-        main run; if Hold, we estimate it here.
+        Both columns are at the{" "}
+        <strong className="text-gray-300">end of year {yearN1}</strong> (same
+        calendar year).{" "}
+        <strong className="text-sky-200/90">A</strong>: years 1–{yearN} in{" "}
+        {source.label} → sell → year {yearN1} in {targetReport.label} (monthly
+        sim on post‑CGT capital).{" "}
+        <strong className="text-violet-200/90">B</strong>: years 1–{yearN1} always
+        in {targetReport.label}. Same stocks/yields/contributions rules for year{" "}
+        {yearN1}, so larger capital → more $ yield.
       </p>
+      {!reportPlus1 && (
+        <p className="mb-3 text-xs text-amber-200/90">
+          Re-run the planner to load year {yearN1} for path B (horizon+1 sim).
+        </p>
+      )}
 
       {/* Strategy choosers — primary UI */}
       <div className="mb-4 grid gap-4 lg:grid-cols-2">
@@ -2153,94 +2206,51 @@ function SwitchIncomePanel({
             : " · phase‑1 was Hold/drawdown — CGT estimated here for the switch sale"}
         </div>
         <div className="mt-1 text-xs text-gray-400">
-          {targetReport.label} cash yield{" "}
-          <strong className="text-gray-300">
-            {blend.cashYieldPct.toFixed(2)}%
-          </strong>{" "}
-          p.a. → year‑1 gross cash{" "}
-          <strong className="text-emerald-200">{money(grossCash)}</strong>
-          {blend.reinvestYieldPct > 0.01 && (
-            <>
-              {" "}
-              (+ {money(grossReinvest)} DRP)
-            </>
-          )}
+          After sale, year {yearN1} is a full monthly sim of {targetReport.label}{" "}
+          (same rules as the main planner — not a simple capital × yield %).
         </div>
-        {targetReport.label.toLowerCase().includes("hybrid") && (
-          <div className="mt-1.5 text-xs text-amber-200/90">
-            Hybrid is only ~half high‑yield. Click{" "}
-            <strong>Dividend</strong> under “Put all sale cash into” for ~5.5–6%
-            on the full {money(redeploy)}.
-          </div>
-        )}
       </div>
 
-      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="mb-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
-          label="Phase 1 portfolio (before sale)"
+          label={`${source.label} before sale (end yr ${yearN})`}
           value={money(portfolioGross)}
-          hint={`${source.label} · market value`}
+          hint="market value"
         />
         <StatCard
-          label={
-            sale.cgtAlreadyInMainSim
-              ? "CGT on sale (from main sim)"
-              : "CGT on sale (estimated)"
-          }
+          label="CGT on switch sale"
           value={money(cgtOnSwitch)}
           hint={
-            sale.cgtAlreadyInMainSim
-              ? `on ${money(sale.capitalGain)} indexed gain · not double-counted`
-              : sale.capitalGain > 0
-                ? `on ${money(sale.capitalGain)} indexed gain · Hold had no exit CGT`
-                : "no capital gain"
+            sale.capitalGain > 0
+              ? `on ${money(sale.capitalGain)} gain`
+              : "no gain"
           }
         />
         <StatCard
-          label="Net cash after sale CGT"
-          value={money(portfolioAfterCgt)}
-          hint="what you have to reinvest"
-        />
-        <StatCard
-          label={`Phase 2 new cost base → ${targetReport.label}`}
+          label={`A: start yr ${yearN1} capital (post‑CGT)`}
           value={money(redeploy)}
-          hint={
-            includeCashDivs
-              ? "new buy = sale net + saved cash divs · indexation restarts"
-              : "new buy at this amount · old indexed cost dies with the sale"
-          }
+          hint="new buy into phase 2 · cost base resets"
           emphasize
         />
         <StatCard
-          label={`${targetReport.label} blended yield`}
-          value={`${blend.totalYieldPct.toFixed(2)}% p.a.`}
-          hint={`cash ${blend.cashYieldPct.toFixed(2)}% · DRP ${blend.reinvestYieldPct.toFixed(2)}%`}
-        />
-        <StatCard
-          label="Year‑1 cash dividends (gross)"
-          value={money(grossCash)}
-          hint={
-            grossReinvest > 0
-              ? `+ ${money(grossReinvest)} DRP · yield on new cost base ${money(redeploy)}`
-              : `= ${money(redeploy)} × ${blend.cashYieldPct.toFixed(2)}% cash`
-          }
+          label={`A: end yr ${yearN1} capital`}
+          value={money(aEndCapital)}
+          hint={`after growth, yield, MER, +${money(pathA.contributions)} contrib`}
           emphasize
         />
       </div>
 
       {(allDrpAfterSwitch || allDrpDividendPath) && (
         <p className="mb-3 rounded-lg border border-amber-900/40 bg-amber-950/20 px-3 py-2 text-xs text-amber-100/90">
-          <strong>Cash is $0 because reinvest (DRP) is on</strong> for those
-          sleeves — yield still happens, but it buys more units instead of
-          paying cash. Turn <strong>Reinvest</strong> off on the Dividend
-          strategy (and re-run) if you want bankable dividends in this table.
+          <strong>Cash is $0 because reinvest (DRP) is on</strong> — yield still
+          happens, but buys more units. Tax on DRP is still due from other cash.
         </p>
       )}
 
       {!dividendStrategy && (
         <p className="mb-4 text-xs text-amber-200/80">
-          No “Dividend” strategy in this run — add one to the main comparison to
-          compare “never switched” vs “switch at end”.
+          No matching “never switched” strategy in the horizon+1 run — re-run
+          planner after setting phase‑2 to Dividend (or Hybrid).
         </p>
       )}
 
@@ -2248,26 +2258,20 @@ function SwitchIncomePanel({
         <table className="w-full min-w-[640px] text-left text-sm">
           <thead className="bg-gray-900/80 text-xs uppercase tracking-wide text-gray-500">
             <tr>
-              <th className="px-3 py-2 font-medium">Metric</th>
+              <th className="px-3 py-2 font-medium">Metric · year {yearN1}</th>
               <th className="px-3 py-2 font-medium text-sky-200/90">
                 A · Switch at end
                 <div className="mt-0.5 max-w-[14rem] text-[10px] font-normal normal-case leading-snug text-gray-500">
-                  {source.label} for {report.horizonYears}y → sell → all cash
-                  into {targetReport.label} →{" "}
-                  <strong className="text-gray-400">year 1</strong> income on
-                  that pile
+                  {source.label} yrs 1–{yearN} → sell → {targetReport.label} yr{" "}
+                  {yearN1} (monthly sim)
                 </div>
               </th>
               {dividendStrategy && (
                 <th className="px-3 py-2 font-medium text-violet-200/90">
                   B · Never switched
                   <div className="mt-0.5 max-w-[14rem] text-[10px] font-normal normal-case leading-snug text-gray-500">
-                    Stayed in {dividendStrategy.label} for all{" "}
-                    {report.horizonYears} years →{" "}
-                    <strong className="text-gray-400">
-                      year {dividendSameYearNum}
-                    </strong>{" "}
-                    from the full sim (same calendar year as the switch)
+                    {dividendStrategy.label} yrs 1–{yearN1} · year {yearN1} from
+                    full sim
                   </div>
                 </th>
               )}
@@ -2276,41 +2280,41 @@ function SwitchIncomePanel({
           <tbody>
             <tr className="border-t border-gray-800/80">
               <td className="px-3 py-2 text-gray-400">
-                Portfolio capital (end of path / start of income year)
+                Portfolio capital at <strong>end of year {yearN1}</strong>
               </td>
               <td className="px-3 py-2 tabular-nums text-gray-100">
-                {money(redeploy)}
+                {money(aEndCapital)}
                 <div className="text-[10px] text-gray-500">
-                  after exit CGT on {source.label}
+                  started year {yearN1} with {money(redeploy)} after CGT
                 </div>
               </td>
               {dividendStrategy && (
                 <td className="px-3 py-2 tabular-nums text-violet-100/90">
-                  {money(dividendStrategy.finalValue)}
+                  {money(bEndCapital)}
                   <div className="text-[10px] text-gray-500">
-                    still invested (no forced sale)
+                    no sale · still invested
                   </div>
                 </td>
               )}
             </tr>
             <tr className="border-t border-gray-800/80 bg-emerald-500/5">
               <td className="px-3 py-2 text-gray-400">
-                Cash income that year (to bank)
+                Cash income during year {yearN1}
               </td>
               <td className="px-3 py-2 tabular-nums font-medium text-emerald-200">
-                {money(grossCash)}
+                {money(aCash)}
                 {allDrpAfterSwitch && (
                   <div className="text-[10px] font-normal text-amber-200/80">
-                    all reinvested — see DRP row
+                    all reinvested — see DRP
                   </div>
                 )}
               </td>
               {dividendStrategy && (
                 <td className="px-3 py-2 tabular-nums font-medium text-violet-100">
-                  {money(dividendSameYearCash)}
+                  {money(bCash)}
                   {allDrpDividendPath && (
                     <div className="text-[10px] font-normal text-amber-200/80">
-                      all reinvested — see DRP row
+                      all reinvested — see DRP
                     </div>
                   )}
                 </td>
@@ -2318,56 +2322,51 @@ function SwitchIncomePanel({
             </tr>
             <tr className="border-t border-gray-800/80">
               <td className="px-3 py-2 text-gray-400">
-                DRP that year (stays in portfolio)
+                DRP during year {yearN1}
               </td>
               <td className="px-3 py-2 tabular-nums text-gray-100">
-                {money(grossReinvest)}
+                {money(aDrp)}
               </td>
               {dividendStrategy && (
                 <td className="px-3 py-2 tabular-nums text-violet-100/90">
-                  {money(dividendSameYearReinv)}
+                  {money(bDrp)}
                 </td>
               )}
             </tr>
             <tr className="border-t border-gray-800/80">
               <td className="px-3 py-2 text-gray-400">
-                Total yield that year (cash + DRP)
+                Total yield during year {yearN1} (cash + DRP)
               </td>
               <td className="px-3 py-2 tabular-nums text-gray-100">
-                {money(grossTotal)}
+                {money(aYield)}
+                {redeploy > 0 && (
+                  <div className="text-[10px] text-gray-500">
+                    {((aYield / redeploy) * 100).toFixed(2)}% of start‑yr capital
+                  </div>
+                )}
               </td>
               {dividendStrategy && (
                 <td className="px-3 py-2 tabular-nums text-violet-100/90">
-                  {money(dividendSameYearTotal)}
+                  {money(bYield)}
                 </td>
               )}
             </tr>
             <tr className="border-t border-gray-800/80 bg-amber-500/5">
               <td className="px-3 py-2 text-gray-400">
-                Est. tax on distributions (cash + DRP)
+                Est. tax on distributions (year {yearN1})
                 {taxProfile
                   ? ` (${(mtr * 100).toFixed(0)}%+${(med * 100).toFixed(0)}% Med)`
                   : ""}
                 <div className="text-[10px] text-gray-500 normal-case">
-                  AU: DRP is still taxable income — not $0 just because reinvested
+                  DRP is still taxable income
                 </div>
               </td>
               <td className="px-3 py-2 tabular-nums text-amber-100">
-                {money(taxOnAllDistributions)}
-                {(taxOnCash > 0 || taxOnReinvest > 0) && (
-                  <div className="text-[10px] text-gray-500">
-                    cash {money(taxOnCash)} · DRP {money(taxOnReinvest)}
-                  </div>
-                )}
+                {money(aTax)}
               </td>
               {dividendStrategy && (
                 <td className="px-3 py-2 tabular-nums text-amber-100/90">
-                  {money(dividendSameYearTaxAll)}
-                  {simYearIncomeTax != null && simYearIncomeTax > 0 && (
-                    <div className="text-[10px] text-gray-500">
-                      from sim year {dividendSameYearNum}
-                    </div>
-                  )}
+                  {money(bTax)}
                 </td>
               )}
             </tr>
@@ -2376,19 +2375,19 @@ function SwitchIncomePanel({
                 Cash in hand after tax on cash portion
               </td>
               <td className="px-3 py-2 tabular-nums font-medium text-emerald-200">
-                {money(netCashInHand)}
+                {money(aCashInHand)}
                 {allDrpAfterSwitch && (
                   <div className="text-[10px] font-normal text-gray-500">
-                    $0 cash — tax above still due (pay from other money)
+                    $0 cash — DRP tax still due from other money
                   </div>
                 )}
               </td>
               {dividendStrategy && (
                 <td className="px-3 py-2 tabular-nums font-medium text-violet-100">
-                  {money(dividendSameYearNetCash)}
+                  {money(bCashInHand)}
                   {allDrpDividendPath && (
                     <div className="text-[10px] font-normal text-gray-500">
-                      $0 cash — tax above still due
+                      $0 cash — DRP tax still due
                     </div>
                   )}
                 </td>
@@ -2399,93 +2398,25 @@ function SwitchIncomePanel({
                 Economic yield after all distribution tax
               </td>
               <td className="px-3 py-2 tabular-nums text-gray-100">
-                {money(economicAfterTax)}
+                {money(aEconomic)}
               </td>
               {dividendStrategy && (
                 <td className="px-3 py-2 tabular-nums text-violet-100/90">
-                  {money(dividendEconomicAfterTax)}
+                  {money(bEconomic)}
                 </td>
               )}
             </tr>
-            {dividendStrategy && (
-              <tr className="border-t border-gray-800/80">
-                <td className="px-3 py-2 text-gray-400">
-                  Cash taken over full {report.horizonYears}y (path B only)
-                </td>
-                <td className="px-3 py-2 text-gray-500">—</td>
-                <td className="px-3 py-2 tabular-nums text-violet-100/90">
-                  {money(dividendStrategy.totalDividendsCash)}
-                  <div className="text-[10px] text-gray-500">
-                    sum of cash years 1–{report.horizonYears}
-                  </div>
-                </td>
-              </tr>
-            )}
           </tbody>
         </table>
       </div>
 
-      <p className="mb-3 text-xs text-gray-500">
-        <strong className="text-gray-400">Only two paths:</strong>{" "}
-        <span className="text-sky-200/90">A = switch</span> (sell phase 1, buy
-        phase 2, estimate next year) vs{" "}
-        <span className="text-violet-200/90">B = never switched</span> (Dividend
-        strategy for the whole horizon — year {dividendSameYearNum} of the sim).
-        There is no third “held × yield” column.
-      </p>
-
-      {sleeves.length > 0 && (
-        <div className="mb-3 overflow-auto rounded-lg border border-gray-800/80">
-          <table className="w-full min-w-[560px] text-left text-xs">
-            <thead className="text-gray-500">
-              <tr>
-                <th className="px-3 py-2 font-medium">Phase 2 sleeve</th>
-                <th className="px-3 py-2 font-medium">Weight</th>
-                <th className="px-3 py-2 font-medium">Yield</th>
-                <th className="px-3 py-2 font-medium">Mode</th>
-                <th className="px-3 py-2 font-medium">Gross $/yr</th>
-                <th className="px-3 py-2 font-medium">Est. tax</th>
-              </tr>
-            </thead>
-            <tbody>
-              {sleeves.map((s) => (
-                <tr key={s.ticker} className="border-t border-gray-800/60">
-                  <td className="px-3 py-1.5 text-gray-200">{s.ticker}</td>
-                  <td className="px-3 py-1.5 tabular-nums text-gray-400">
-                    {(s.weight * 100).toFixed(0)}%
-                  </td>
-                  <td className="px-3 py-1.5 tabular-nums text-gray-400">
-                    {s.yieldPct.toFixed(2)}%
-                    {s.frankingPct > 0 ? ` · ${s.frankingPct}% franked` : ""}
-                  </td>
-                  <td className="px-3 py-1.5 text-gray-500">
-                    {s.reinvest ? "DRP" : "cash"}
-                  </td>
-                  <td className="px-3 py-1.5 tabular-nums text-gray-200">
-                    {money(s.grossAud)}
-                  </td>
-                  <td className="px-3 py-1.5 tabular-nums text-amber-100/90">
-                    {money(Math.max(0, s.netTaxAud))}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      <p className="text-xs text-gray-500">
-        Sale CGT uses phase‑1’s indexed cost (taxed once). After the buy,
-        phase‑2 cost base = redeployed cash only — no carried indexation from
-        phase‑1; CPI clock starts again on the new purchase. Year‑1 switch
-        income is yield on that new pile only (not a multi‑year phase‑2 CGT
-        sim). Yields are your assumed rates. Switch column is
-        year‑1 after redeploy; Dividend column is{" "}
-        <strong className="text-gray-400">
-          actual sim cash in the final horizon year
-        </strong>{" "}
-        (same year you would switch). Dividend path also earned cash in earlier
-        years — see total horizon row. Not advice.
+      <p className="text-[11px] leading-relaxed text-gray-500">
+        Both columns use year <strong className="text-gray-400">{yearN1}</strong>{" "}
+        only. Path A runs the same monthly engine for that year on post‑sale
+        capital (growth, yield, MER, contributions, DRP tax). Path B is year{" "}
+        {yearN1} of the full {yearN1}y {targetReport.label} sim. Larger end
+        capital should produce more $ yield when rules match — re-run after
+        changing strategies.
       </p>
     </div>
   );

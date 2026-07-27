@@ -6,9 +6,12 @@ import { useCallback, useEffect, useState } from "react";
 import {
   fetchHealth,
   fetchSettings,
+  fetchYahooStatus,
+  importYahooPayload,
   putSettings,
   wipeCaches,
   type AppSettings,
+  type YahooStatus,
 } from "./api";
 import { Disclaimer } from "./Disclaimer";
 
@@ -21,14 +24,19 @@ export function SettingsPanel() {
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [wipeMsg, setWipeMsg] = useState<string | null>(null);
+  const [yahooStatus, setYahooStatus] = useState<YahooStatus | null>(null);
+  const [yahooPaste, setYahooPaste] = useState("");
+  const [yahooSymbolHint, setYahooSymbolHint] = useState("");
+  const [yahooImportMsg, setYahooImportMsg] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
-      const [s, health] = await Promise.all([
+      const [s, health, y] = await Promise.all([
         fetchSettings(),
         fetchHealth().catch(() => null),
+        fetchYahooStatus().catch(() => null),
       ]);
       setSettings(s.settings);
       setDbPath(s.dbPath ?? health?.dbPath ?? null);
@@ -37,6 +45,7 @@ export function SettingsPanel() {
           s.settings.yahoo_refresh_enabled === "true",
       );
       setUsWithholdingPct(s.settings.us_withholding_pct ?? "15");
+      if (y) setYahooStatus(y);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -89,6 +98,39 @@ export function SettingsPanel() {
       setWipeMsg(
         `Cleared caches: quotes ${d.quote_cache}, bars ${d.price_cache}, dividends ${d.dividend_cache}, FX ${d.fx_cache}`,
       );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onImportYahooPaste() {
+    const text = yahooPaste.trim();
+    if (!text) {
+      setError("Paste Yahoo chart/spark/quote JSON first");
+      return;
+    }
+    let payload: unknown = text;
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      // API accepts string too, but prefer parse here for better local errors
+      setError("Paste must be valid JSON (copy full response body from browser)");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    setYahooImportMsg(null);
+    try {
+      const r = await importYahooPayload(
+        payload,
+        yahooSymbolHint.trim() || undefined,
+      );
+      setYahooImportMsg(
+        `Imported ${r.kind}: ${r.symbols.join(", ") || "—"} · ${r.barsWritten} bars · ${r.quotesWritten} quotes`,
+      );
+      setYahooPaste("");
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -176,6 +218,68 @@ export function SettingsPanel() {
               <span className="text-xs text-emerald-300">Saved</span>
             )}
           </div>
+        </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-950/40 p-4">
+          <h3 className="mb-2 text-sm font-medium text-gray-200">
+            Manual Yahoo import
+          </h3>
+          <p className="mb-2 text-xs text-gray-500">
+            When Node is rate-limited but your browser still works: open a Yahoo
+            URL → copy the JSON → paste here (or use the browser console{" "}
+            <code className="text-gray-400">risu.importYahoo(json)</code>).
+          </p>
+          {yahooStatus?.lastUrl && (
+            <p className="mb-2 break-all text-xs">
+              <span className="text-gray-500">Last failed URL: </span>
+              <a
+                href={yahooStatus.lastUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-sky-400 hover:underline"
+              >
+                {yahooStatus.lastUrl}
+              </a>
+            </p>
+          )}
+          <p className="mb-2 text-[11px] text-gray-600">
+            Bulk history:{" "}
+            <code className="text-gray-500">
+              risu.sparkUrl([&quot;TSLA&quot;,&quot;VAS.AX&quot;])
+            </code>
+            · single:{" "}
+            <code className="text-gray-500">risu.chartUrl(&quot;TSLA&quot;)</code>
+          </p>
+          <label className="mb-2 block text-sm max-w-xs">
+            <span className="mb-1 block text-xs text-gray-500">
+              Symbol hint (optional, chart-only)
+            </span>
+            <input
+              className="field"
+              value={yahooSymbolHint}
+              disabled={busy}
+              placeholder="e.g. TSLA or VAS.AX"
+              onChange={(e) => setYahooSymbolHint(e.target.value)}
+            />
+          </label>
+          <textarea
+            className="field min-h-[120px] w-full font-mono text-xs"
+            disabled={busy}
+            placeholder='Paste full Yahoo JSON here — chart, spark, or quote body…'
+            value={yahooPaste}
+            onChange={(e) => setYahooPaste(e.target.value)}
+          />
+          <button
+            type="button"
+            disabled={busy || !yahooPaste.trim()}
+            onClick={() => void onImportYahooPaste()}
+            className="mt-2 rounded-lg border border-sky-800/60 bg-sky-950/40 px-4 py-2 text-sm text-sky-100 hover:bg-sky-900/40 disabled:opacity-50"
+          >
+            Import into price cache
+          </button>
+          {yahooImportMsg && (
+            <p className="mt-2 text-xs text-emerald-300/90">{yahooImportMsg}</p>
+          )}
         </div>
 
         <div className="rounded-xl border border-gray-800 bg-gray-950/40 p-4">

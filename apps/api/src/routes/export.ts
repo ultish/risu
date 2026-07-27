@@ -6,7 +6,7 @@ import path from "node:path";
 
 /**
  * GET /api/export/transactions.csv?portfolioId=&broker=&source=&ticker=
- * GET /api/export/backup — download yields.db
+ * GET /api/export/backup — download risu-YYYY-MM-DD.db
  */
 export function registerExportRoutes(
   app: {
@@ -75,7 +75,7 @@ export function registerExportRoutes(
       headers: {
         "Content-Type": "text/csv; charset=utf-8",
         "Content-Disposition":
-          'attachment; filename="yields-transactions.csv"',
+          `attachment; filename="risu-transactions-${new Date().toISOString().slice(0, 10)}.csv"`,
       },
     });
   });
@@ -94,7 +94,8 @@ export function registerExportRoutes(
     }
 
     const buf = fs.readFileSync(dbPath);
-    const filename = path.basename(dbPath) || "yields.db";
+    const day = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+    const filename = `risu-${day}.db`;
     return new Response(buf, {
       status: 200,
       headers: {

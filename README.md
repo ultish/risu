@@ -1,6 +1,8 @@
-# Yields
+# Risu
 
-Local investment **portfolio tracker** for an AU resident (+ planner later) — **ASX and non-AU (e.g. US)** holdings.
+**Risu** (りす — squirrel) — local investment **portfolio tracker** for an AU resident (+ planner) — **ASX and non-AU (e.g. US)** holdings.
+
+> Package paths may still say `@yields/*` / `yields.db` until a full monorepo rename.
 
 - **Broker CSV/XLSX import** — CommSec, Pocket, Selfwealth, Stake, Betashares Direct  
 - **DRP/DRIP rows** from those files become portfolio lots (`type=drp`)  

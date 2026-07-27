@@ -1,5 +1,6 @@
 import { computeHoldings } from "./holdings.js";
 import { holdingPriceKey } from "./market.js";
+import { inferSplitEvents } from "./splits.js";
 import type { ParsedTransaction } from "./types.js";
 import { toYahooSymbol } from "./yahoo.js";
 
@@ -71,6 +72,8 @@ export function buildPerformanceSeries(
   const priceIndex = buildLastPriceIndex(options.priceSeries ?? {});
   const fxSeriesIndex = buildLastFxIndex(options.fx?.series ?? {});
   const flatFx = options.fx?.rates ?? {};
+  // Full-ledger splits so early month-ends can back-apply ratios vs Yahoo adj prices
+  const splitEvents = inferSplitEvents(sorted);
 
   const points: PerformancePoint[] = [];
 
@@ -81,7 +84,12 @@ export function buildPerformanceSeries(
     const prices = pricesAsOf(txsToDate, date, priceIndex);
     const fxRates = fxAsOf(date, flatFx, fxSeriesIndex);
 
-    const holdings = computeHoldings(txsToDate, { prices, fxRates });
+    const holdings = computeHoldings(txsToDate, {
+      prices,
+      fxRates,
+      valuationAsOf: date,
+      splitEvents,
+    });
 
     let costSum = 0;
     let costAny = false;

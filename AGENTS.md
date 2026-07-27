@@ -1,13 +1,28 @@
-# Agent guide — Yields
+# Agent guide — Risu
 
 Instructions for AI coding agents (and humans) working in this repository.
 
 ## Project snapshot
 
+- **Product name:** **Risu** (りす — squirrel; same animal-name style as other personal tools).
 - **What:** Local AU-resident portfolio tracker + **new-money planner** (post–Jul 2027 CGT framing).
 - **Stack:** TypeScript monorepo — `apps/web` (Vite/React), `apps/api` (Hono + better-sqlite3), `packages/core` (parsers, tax, planner, Yahoo client).
 - **DB:** SQLite file (`YIELDS_DB_PATH` or `data/yields.db`). Not Dexie.
 - **Not goals:** Live broker APIs, full ATO software, SaaS multi-user.
+
+### Operator book (currency / markets)
+
+Primary holdings for this install (do not simplify the codebase down to only these):
+
+| Market | How held | Quote / trade currency |
+|--------|----------|-------------------------|
+| **Australia** | ASX equities/ETFs | **AUD** |
+| **United States** | US equities (e.g. TSLA) | **USD** prices; cost often AUD via Sharesight trade FX |
+| **Japan exposure** | Via **Betashares** (AU product on ASX), not TSE/JPY | **AUD** — treat as ASX, never invent JPY FX for these |
+
+- Operator does **not** trade GBP/EUR/other books day-to-day; **keep** multi-currency helpers (LSE, EUR, generic `AUD{CCY}=X`, Frankfurter, etc.) for future-proofing and tests — do **not** delete them.
+- For performance MTM: ASX/Betashares → AUD (no FX); US → USD price × `AUDUSD` history → AUD. Cost from ledger currency as stored.
+- FX history cache priority in practice: **AUDUSD** (and any other pair only if a foreign quote currency appears).
 
 Read **PLAN.md** for phased scope. Read **README.md** for run instructions. Read **docs/import-sources.md** for broker/Sharesight import reality.
 

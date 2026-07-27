@@ -27,6 +27,73 @@ import { PlannerPanel } from "./PlannerPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { TaxSettingsPanel } from "./TaxSettingsPanel";
 
+/** Top-level nav — synced to `?tab=` for copyable links */
+const MAIN_TABS = [
+  "holdings",
+  "transactions",
+  "import",
+  "tax",
+  "planner",
+  "settings",
+] as const;
+type MainTab = (typeof MAIN_TABS)[number];
+const IMPORT_SUBS = ["file", "paste", "manual"] as const;
+type ImportSub = (typeof IMPORT_SUBS)[number];
+const TAX_SUBS = ["profiles", "drp"] as const;
+type TaxSub = (typeof TAX_SUBS)[number];
+
+function isMainTab(v: string | null | undefined): v is MainTab {
+  return !!v && (MAIN_TABS as readonly string[]).includes(v);
+}
+function isImportSub(v: string | null | undefined): v is ImportSub {
+  return !!v && (IMPORT_SUBS as readonly string[]).includes(v);
+}
+function isTaxSub(v: string | null | undefined): v is TaxSub {
+  return !!v && (TAX_SUBS as readonly string[]).includes(v);
+}
+
+/** Read nav from `?tab=` (preferred) or `#tab` hash. */
+function readNavFromUrl(): {
+  tab: MainTab;
+  importSub: ImportSub;
+  taxSub: TaxSub;
+} {
+  const url = new URL(window.location.href);
+  const qTab = url.searchParams.get("tab");
+  const hash = url.hash.replace(/^#\/?/, "").split(/[?&]/)[0] || "";
+  const tab: MainTab = isMainTab(qTab)
+    ? qTab
+    : isMainTab(hash)
+      ? hash
+      : "holdings";
+  const importSub: ImportSub = isImportSub(url.searchParams.get("import"))
+    ? (url.searchParams.get("import") as ImportSub)
+    : "file";
+  const taxSub: TaxSub = isTaxSub(url.searchParams.get("tax"))
+    ? (url.searchParams.get("tax") as TaxSub)
+    : "profiles";
+  return { tab, importSub, taxSub };
+}
+
+/** Push or replace `?tab=` (and import/tax sub params). Clears bare hash. */
+function writeNavToUrl(
+  tab: MainTab,
+  importSub: ImportSub,
+  taxSub: TaxSub,
+  mode: "push" | "replace" = "push",
+) {
+  const url = new URL(window.location.href);
+  url.searchParams.set("tab", tab);
+  if (tab === "import") url.searchParams.set("import", importSub);
+  else url.searchParams.delete("import");
+  if (tab === "tax") url.searchParams.set("tax", taxSub);
+  else url.searchParams.delete("tax");
+  url.hash = "";
+  const next = `${url.pathname}${url.search}`;
+  if (mode === "replace") window.history.replaceState({ tab }, "", next);
+  else window.history.pushState({ tab }, "", next);
+}
+
 type TxSortKey =
   | "date"
   | "ticker"
@@ -116,19 +183,60 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [yahooStatus, setYahooStatus] = useState<YahooStatus | null>(null);
-  /** Top-level nav — import/tax use sub-modes to keep the bar short */
-  const [tab, setTab] = useState<
-    | "holdings"
-    | "transactions"
-    | "import"
-    | "tax"
-    | "planner"
-    | "settings"
-  >("holdings");
-  const [importSub, setImportSub] = useState<"file" | "paste" | "manual">(
-    "file",
+  /** Bump after price refresh so PerformanceChart reloads */
+  const [pricesReloadToken, setPricesReloadToken] = useState(0);
+  /** Top-level nav — mirrored to `?tab=` (import/tax sub via `?import=` / `?tax=`) */
+  const initialNav = useMemo(() => readNavFromUrl(), []);
+  const [tab, setTabState] = useState<MainTab>(initialNav.tab);
+  const [importSub, setImportSubState] = useState<ImportSub>(
+    initialNav.importSub,
   );
-  const [taxSub, setTaxSub] = useState<"profiles" | "drp">("profiles");
+  const [taxSub, setTaxSubState] = useState<TaxSub>(initialNav.taxSub);
+
+  const setTab = useCallback(
+    (next: MainTab) => {
+      setTabState(next);
+      writeNavToUrl(next, importSub, taxSub, "push");
+    },
+    [importSub, taxSub],
+  );
+
+  const setImportSub = useCallback(
+    (next: ImportSub) => {
+      setImportSubState(next);
+      setTabState("import");
+      writeNavToUrl("import", next, taxSub, "push");
+    },
+    [taxSub],
+  );
+
+  const setTaxSub = useCallback(
+    (next: TaxSub) => {
+      setTaxSubState(next);
+      setTabState("tax");
+      writeNavToUrl("tax", importSub, next, "push");
+    },
+    [importSub],
+  );
+
+  // Browser back/forward
+  useEffect(() => {
+    const sync = () => {
+      const nav = readNavFromUrl();
+      setTabState(nav.tab);
+      setImportSubState(nav.importSub);
+      setTaxSubState(nav.taxSub);
+    };
+    // Normalize bare load → always have ?tab= in the address bar
+    writeNavToUrl(
+      initialNav.tab,
+      initialNav.importSub,
+      initialNav.taxSub,
+      "replace",
+    );
+    window.addEventListener("popstate", sync);
+    return () => window.removeEventListener("popstate", sync);
+  }, [initialNav]);
 
   const [newPortfolioName, setNewPortfolioName] = useState("");
 
@@ -341,17 +449,23 @@ export default function App() {
     const cooling =
       yahooStatus?.state === "cooling" && (yahooStatus.waitSeconds ?? 0) > 0;
     if (cooling) {
-      const ok = window.confirm(
+      // Cool-down only skips Yahoo — refresh still runs ASX/Nasdaq/FX fallbacks.
+      // Optional: force Yahoo anyway (usually worsens ban).
+      const forceYahoo = window.confirm(
         `Yahoo is in cool-down (${formatYahooWait(yahooStatus!.waitSeconds)} left).\n\n` +
-          `Yahoo rarely tells us an exact wait — this timer is from the last rate-limit response (Retry-After if present, otherwise 15m→1h→3h→6h).\n\n` +
-          `Force refresh anyway? This often makes the ban longer.`,
+          `OK = refresh prices via fallbacks (ASX / Nasdaq / FX) without hitting Yahoo.\n` +
+          `Cancel = abort.\n\n` +
+          `Tip: do not force Yahoo while banned — use OK for fallbacks only.`,
       );
-      if (!ok) return;
+      if (!forceYahoo) return;
+      // force:false — use fallbacks, skip Yahoo
     }
     setBusy(true);
     setError(null);
     try {
-      const r = await refreshPrices({ force: cooling });
+      // History fills price_cache for the performance chart (1y Yahoo chart/spark).
+      // Never force Yahoo from the main button while cooling (fallbacks only).
+      const r = await refreshPrices({ force: false, includeHistory: true });
       if (r.yahoo) setYahooStatus(r.yahoo);
       else {
         const y = await fetchYahooStatus().catch(() => null);
@@ -366,7 +480,10 @@ export default function App() {
               .map((f) => `${f.ticker}(${f.exchange})`)
               .join(", ")}`,
         );
+      } else if (r.note) {
+        // Show success path (e.g. fallbacks used) briefly as non-error is fine
       }
+      setPricesReloadToken((n) => n + 1);
       await load();
     } catch (e) {
       const ye = e as Error & { yahoo?: YahooStatus };
@@ -502,14 +619,24 @@ export default function App() {
     <div className="mx-auto min-h-screen max-w-6xl px-4 py-8">
       <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <p className="text-sm tracking-wide text-emerald-400/90">YIELDS</p>
-          <h1 className="text-3xl font-semibold tracking-tight">
-            Portfolio tracker
-          </h1>
-          <p className="mt-1 max-w-xl text-sm text-gray-400">
-            Portfolios (you / partner) can mix brokers. Filter by portfolio,
-            broker, or import source.
-          </p>
+          <div className="flex items-center gap-4">
+            <img
+              src="/risu-icon.png"
+              alt="Risu"
+              width={56}
+              height={56}
+              className="h-14 w-14 rounded-2xl shadow-md shadow-black/30 ring-1 ring-white/10"
+            />
+            <div>
+              <h1 className="text-2xl font-semibold tracking-wide text-emerald-400/90 sm:text-3xl">
+                RISU · りす
+              </h1>
+              <p className="mt-0.5 max-w-xl text-sm text-gray-400">
+                Local portfolio tracker · ASX &amp; US. Portfolios can mix
+                brokers. Filter by portfolio, broker, or import source.
+              </p>
+            </div>
+          </div>
         </div>
         <div className="flex flex-col items-stretch gap-2 sm:items-end">
           <YahooStatusBadge
@@ -644,10 +771,10 @@ export default function App() {
             key={id}
             type="button"
             onClick={() => setTab(id)}
-            className={`flex-1 rounded-lg px-2 py-2 text-xs sm:text-sm transition ${
+            className={`flex-1 rounded-lg px-2 py-2 text-xs sm:text-sm transition-colors duration-150 ${
               tab === id
                 ? "bg-emerald-500/15 text-emerald-300"
-                : "text-gray-400 hover:text-gray-200"
+                : "text-gray-400 hover:bg-gray-800 hover:text-emerald-200/90"
             }`}
           >
             {label}
@@ -721,7 +848,10 @@ export default function App() {
               </div>
             )}
           </Panel>
-          <PerformanceChart filters={filters} />
+          <PerformanceChart
+            filters={filters}
+            reloadToken={pricesReloadToken}
+          />
         </div>
       )}
 
@@ -1512,10 +1642,10 @@ function SubNav<T extends string>({
           key={id}
           type="button"
           onClick={() => onChange(id)}
-          className={`rounded-lg px-3 py-1.5 text-sm transition ${
+          className={`rounded-lg px-3 py-1.5 text-sm transition-colors duration-150 ${
             value === id
               ? "bg-gray-800 text-emerald-300"
-              : "text-gray-400 hover:text-gray-200"
+              : "text-gray-400 hover:bg-gray-800/80 hover:text-emerald-200/90"
           }`}
         >
           {label}

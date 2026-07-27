@@ -3,6 +3,13 @@ import type { DividendEvent, PriceBar } from "./types.js";
 
 const YAHOO_CHART = "https://query1.finance.yahoo.com/v8/finance/chart";
 const YAHOO_CHART_QUERY2 = "https://query2.finance.yahoo.com/v8/finance/chart";
+const YAHOO_QUOTE = "https://query1.finance.yahoo.com/v7/finance/quote";
+const YAHOO_QUOTE_Q2 = "https://query2.finance.yahoo.com/v7/finance/quote";
+const YAHOO_SPARK = "https://query1.finance.yahoo.com/v8/finance/spark";
+const YAHOO_SPARK_Q2 = "https://query2.finance.yahoo.com/v8/finance/spark";
+
+/** Prefer bulk multi-symbol calls; keep chunks small when IP is fragile. */
+export const YAHOO_BULK_CHUNK = 20;
 
 /** Browser-like headers — Yahoo often 401s scrapers / bare clients. */
 const YAHOO_HEADERS: Record<string, string> = {
@@ -10,7 +17,123 @@ const YAHOO_HEADERS: Record<string, string> = {
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
   Accept: "application/json,text/plain,*/*",
   "Accept-Language": "en-AU,en;q=0.9",
+  // Chart/quote sometimes want a referer
+  Referer: "https://finance.yahoo.com/",
+  Origin: "https://finance.yahoo.com",
 };
+
+/**
+ * Yahoo often requires a session cookie + crumb for v7 quote (and sometimes
+ * chart). Cached ~45 minutes per process.
+ */
+type YahooSession = {
+  cookie: string;
+  crumb: string;
+  fetchedAt: number;
+};
+
+let yahooSession: YahooSession | null = null;
+const SESSION_TTL_MS = 45 * 60 * 1000;
+
+/** Drop cached crumb/cookie (call after 401 Invalid Cookie). */
+export function clearYahooSession() {
+  yahooSession = null;
+}
+
+async function ensureYahooSession(
+  fetchImpl: typeof fetch,
+): Promise<YahooSession | null> {
+  if (
+    yahooSession &&
+    Date.now() - yahooSession.fetchedAt < SESSION_TTL_MS &&
+    yahooSession.cookie &&
+    yahooSession.crumb
+  ) {
+    return yahooSession;
+  }
+
+  try {
+    // 1) Seed cookies (A1 / A3 etc.)
+    const fc = await fetchImpl("https://fc.yahoo.com", {
+      headers: YAHOO_HEADERS,
+      redirect: "manual",
+    });
+    const cookies: string[] = [];
+    if (typeof fc.headers.getSetCookie === "function") {
+      for (const c of fc.headers.getSetCookie()) {
+        const part = c.split(";")[0]?.trim();
+        if (part) cookies.push(part);
+      }
+    } else {
+      const raw = fc.headers.get("set-cookie");
+      if (raw) {
+        // Best-effort single header parse
+        for (const piece of raw.split(/,(?=\s*[^;]+=)/)) {
+          const part = piece.split(";")[0]?.trim();
+          if (part) cookies.push(part);
+        }
+      }
+    }
+    const cookie = cookies.join("; ");
+    if (!cookie) {
+      yahooSession = null;
+      return null;
+    }
+
+    // 2) Crumb for quote API
+    const crumbRes = await fetchImpl(
+      "https://query2.finance.yahoo.com/v1/test/getcrumb",
+      {
+        headers: {
+          ...YAHOO_HEADERS,
+          Cookie: cookie,
+        },
+      },
+    );
+    if (!crumbRes.ok) {
+      yahooSession = null;
+      return null;
+    }
+    const crumb = (await crumbRes.text()).trim();
+    if (!crumb || crumb.length > 200 || crumb.includes("<")) {
+      yahooSession = null;
+      return null;
+    }
+
+    yahooSession = { cookie, crumb, fetchedAt: Date.now() };
+    return yahooSession;
+  } catch {
+    yahooSession = null;
+    return null;
+  }
+}
+
+function authHeaders(session: YahooSession | null): Record<string, string> {
+  if (!session) return { ...YAHOO_HEADERS };
+  return {
+    ...YAHOO_HEADERS,
+    Cookie: session.cookie,
+  };
+}
+
+export type YahooQuoteSnapshot = {
+  symbol: string;
+  price: number;
+  currency: string | null;
+};
+
+function chunkSymbols(symbols: string[], size = YAHOO_BULK_CHUNK): string[][] {
+  const uniq = [
+    ...new Set(
+      symbols.map((s) => s.trim()).filter((s) => s.length > 0),
+    ),
+  ];
+  const out: string[][] = [];
+  for (let i = 0; i < uniq.length; i += size) {
+    out.push(uniq.slice(i, i + size));
+  }
+  return out;
+}
 
 /** Normalise user tickers to Yahoo symbols */
 export function toYahooSymbol(ticker: string, exchange = "ASX"): string {
@@ -72,6 +195,8 @@ export class YahooHttpError extends Error {
   readonly symbol: string;
   /** From Retry-After header when present (seconds). */
   readonly retryAfterSeconds: number | null;
+  /** Last request URL attempted (crumb stripped when possible). */
+  readonly url: string | null;
 
   constructor(
     message: string,
@@ -79,6 +204,7 @@ export class YahooHttpError extends Error {
       status: number;
       symbol: string;
       retryAfterSeconds?: number | null;
+      url?: string | null;
     },
   ) {
     super(message);
@@ -86,7 +212,287 @@ export class YahooHttpError extends Error {
     this.status = opts.status;
     this.symbol = opts.symbol;
     this.retryAfterSeconds = opts.retryAfterSeconds ?? null;
+    this.url = opts.url ?? null;
   }
+}
+
+/** Drop session crumb so the URL is safe to open in a normal browser tab. */
+export function stripYahooCrumb(url: string): string {
+  try {
+    const u = new URL(url);
+    u.searchParams.delete("crumb");
+    return u.toString();
+  } catch {
+    return url;
+  }
+}
+
+/** Browser-friendly bulk history URL (spark). */
+export function buildYahooSparkHistoryUrl(
+  symbols: string[],
+  range = "1y",
+): string {
+  const joined = [
+    ...new Set(symbols.map((s) => s.trim().toUpperCase()).filter(Boolean)),
+  ].join(",");
+  const url = new URL(YAHOO_SPARK);
+  url.searchParams.set("symbols", joined);
+  url.searchParams.set("range", range);
+  url.searchParams.set("interval", "1d");
+  return url.toString();
+}
+
+/** Browser-friendly single-symbol chart history URL. */
+export function buildYahooChartHistoryUrl(
+  symbol: string,
+  opts: { period1?: Date; period2?: Date; rangeDays?: number } = {},
+): string {
+  const period2 = opts.period2 ?? new Date();
+  const period1 =
+    opts.period1 ??
+    new Date(
+      period2.getTime() -
+        1000 * 60 * 60 * 24 * (opts.rangeDays ?? 365),
+    );
+  const url = new URL(`${YAHOO_CHART}/${encodeURIComponent(symbol)}`);
+  url.searchParams.set("interval", "1d");
+  url.searchParams.set(
+    "period1",
+    String(Math.floor(period1.getTime() / 1000)),
+  );
+  url.searchParams.set(
+    "period2",
+    String(Math.floor(period2.getTime() / 1000)),
+  );
+  url.searchParams.set("events", "div|split");
+  url.searchParams.set("includePrePost", "false");
+  return url.toString();
+}
+
+/** Browser-friendly bulk quote URL (often needs cookies in Node; browser OK). */
+export function buildYahooQuoteUrl(symbols: string[]): string {
+  const joined = [
+    ...new Set(symbols.map((s) => s.trim().toUpperCase()).filter(Boolean)),
+  ].join(",");
+  const url = new URL(YAHOO_QUOTE);
+  url.searchParams.set("symbols", joined);
+  url.searchParams.set("fields", "regularMarketPrice,currency,symbol");
+  return url.toString();
+}
+
+function barsFromCloseSeries(
+  timestamps: number[],
+  closes: Array<number | null | undefined>,
+  ohlc?: {
+    open?: Array<number | null | undefined>;
+    high?: Array<number | null | undefined>;
+    low?: Array<number | null | undefined>;
+    volume?: Array<number | null | undefined>;
+    adjClose?: Array<number | null | undefined>;
+  },
+): PriceBar[] {
+  const bars: PriceBar[] = [];
+  for (let i = 0; i < timestamps.length; i++) {
+    const close = closes[i];
+    if (close == null || Number.isNaN(Number(close))) continue;
+    const c = Number(close);
+    const d = new Date(timestamps[i]! * 1000);
+    bars.push({
+      date: d.toISOString().slice(0, 10),
+      open: Number(ohlc?.open?.[i] ?? c),
+      high: Number(ohlc?.high?.[i] ?? c),
+      low: Number(ohlc?.low?.[i] ?? c),
+      close: c,
+      adjClose: Number(ohlc?.adjClose?.[i] ?? c),
+      volume: Number(ohlc?.volume?.[i] ?? 0),
+    });
+  }
+  return bars;
+}
+
+/**
+ * Parse Yahoo chart JSON (single symbol) into price bars.
+ * Accepts the full API body or `{ chart: … }`.
+ */
+export function parseYahooChartPayload(
+  data: unknown,
+  symbolHint?: string,
+): { symbol: string; bars: PriceBar[] } | null {
+  const root = data as {
+    chart?: {
+      result?: Array<{
+        meta?: { symbol?: string; regularMarketPrice?: number };
+        timestamp?: number[];
+        indicators?: {
+          quote?: Array<{
+            open?: Array<number | null>;
+            high?: Array<number | null>;
+            low?: Array<number | null>;
+            close?: Array<number | null>;
+            volume?: Array<number | null>;
+          }>;
+          adjclose?: Array<{ adjclose?: Array<number | null> }>;
+        };
+      }>;
+    };
+  };
+  const result = root.chart?.result?.[0];
+  if (!result?.timestamp?.length) return null;
+  const quote = result.indicators?.quote?.[0];
+  const adj = result.indicators?.adjclose?.[0]?.adjclose;
+  const symbol = (
+    result.meta?.symbol ||
+    symbolHint ||
+    ""
+  ).toUpperCase();
+  if (!symbol || !quote?.close) return null;
+  const bars = barsFromCloseSeries(result.timestamp, quote.close, {
+    open: quote.open,
+    high: quote.high,
+    low: quote.low,
+    volume: quote.volume,
+    adjClose: adj,
+  });
+  if (!bars.length) return null;
+  return { symbol, bars };
+}
+
+/**
+ * Parse Yahoo spark JSON (multi-symbol history) into per-symbol bars.
+ */
+export function parseYahooSparkPayload(
+  data: unknown,
+): Map<string, PriceBar[]> {
+  const out = new Map<string, PriceBar[]>();
+  const root = data as {
+    spark?: {
+      result?: Array<{
+        symbol?: string;
+        response?: Array<{
+          timestamp?: number[];
+          indicators?: {
+            quote?: Array<{ close?: Array<number | null> }>;
+          };
+          meta?: { symbol?: string };
+        }>;
+        timestamp?: number[];
+        close?: Array<number | null>;
+      }>;
+    };
+  };
+  for (const item of root.spark?.result ?? []) {
+    const sym = (
+      item.symbol ||
+      item.response?.[0]?.meta?.symbol ||
+      ""
+    ).toUpperCase();
+    if (!sym) continue;
+    let timestamps: number[] | undefined;
+    let closes: Array<number | null> | undefined;
+    const resp = item.response?.[0];
+    if (resp?.timestamp?.length) {
+      timestamps = resp.timestamp;
+      closes = resp.indicators?.quote?.[0]?.close;
+    } else if (item.timestamp?.length) {
+      timestamps = item.timestamp;
+      closes = item.close;
+    }
+    if (!timestamps?.length || !closes?.length) {
+      out.set(sym, []);
+      continue;
+    }
+    out.set(sym, barsFromCloseSeries(timestamps, closes));
+  }
+  return out;
+}
+
+/**
+ * Parse Yahoo v7 quote JSON into symbol → last price.
+ */
+export function parseYahooQuotePayload(
+  data: unknown,
+): Map<string, YahooQuoteSnapshot> {
+  const out = new Map<string, YahooQuoteSnapshot>();
+  const root = data as {
+    quoteResponse?: {
+      result?: Array<{
+        symbol?: string;
+        regularMarketPrice?: number;
+        currency?: string;
+      }>;
+    };
+  };
+  for (const row of root.quoteResponse?.result ?? []) {
+    const sym = (row.symbol || "").toUpperCase();
+    const price = Number(row.regularMarketPrice);
+    if (!sym || !Number.isFinite(price)) continue;
+    out.set(sym, {
+      symbol: sym,
+      price,
+      currency: row.currency ?? null,
+    });
+  }
+  return out;
+}
+
+export type YahooImportKind = "chart" | "spark" | "quote";
+
+/**
+ * Auto-detect chart / spark / quote payload and normalise to bars + quotes.
+ * Used by manual paste import when Yahoo is cool-downed in Node.
+ */
+export function parseYahooManualPayload(
+  data: unknown,
+  symbolHint?: string,
+): {
+  kind: YahooImportKind;
+  barsBySymbol: Map<string, PriceBar[]>;
+  quotes: Map<string, YahooQuoteSnapshot>;
+} {
+  const barsBySymbol = new Map<string, PriceBar[]>();
+  const quotes = new Map<string, YahooQuoteSnapshot>();
+
+  const asObj = data as Record<string, unknown> | null;
+  if (asObj && typeof asObj === "object") {
+    if (asObj.chart) {
+      const parsed = parseYahooChartPayload(data, symbolHint);
+      if (parsed) {
+        barsBySymbol.set(parsed.symbol, parsed.bars);
+        const last = parsed.bars[parsed.bars.length - 1];
+        if (last) {
+          quotes.set(parsed.symbol, {
+            symbol: parsed.symbol,
+            price: last.close,
+            currency: null,
+          });
+        }
+        return { kind: "chart", barsBySymbol, quotes };
+      }
+    }
+    if (asObj.spark) {
+      const spark = parseYahooSparkPayload(data);
+      for (const [sym, bars] of spark) {
+        barsBySymbol.set(sym, bars);
+        const last = bars[bars.length - 1];
+        if (last) {
+          quotes.set(sym, {
+            symbol: sym,
+            price: last.close,
+            currency: null,
+          });
+        }
+      }
+      return { kind: "spark", barsBySymbol, quotes };
+    }
+    if (asObj.quoteResponse) {
+      const q = parseYahooQuotePayload(data);
+      for (const [sym, snap] of q) quotes.set(sym, snap);
+      return { kind: "quote", barsBySymbol, quotes };
+    }
+  }
+  throw new Error(
+    "Unrecognised Yahoo JSON — paste full body from chart, spark, or quote URL (must include chart / spark / quoteResponse).",
+  );
 }
 
 export function isYahooHttpError(e: unknown): e is YahooHttpError {
@@ -116,51 +522,49 @@ function parseRetryAfterSeconds(res: Response): number | null {
 }
 
 /**
- * Yahoo's unofficial chart API rate-limits aggressively (429) and sometimes
- * keeps blocking the same IP for many minutes/hours — “wait 30s” is often wrong.
- * We retry with backoff across hosts; callers should prefer DB cache.
+ * Yahoo's unofficial APIs rate-limit aggressively (429). Prefer **bulk**
+ * multi-symbol endpoints; use crumb session when available; few retries.
+ * Callers must prefer DB cache and stop on cool-down.
  */
-async function fetchChartJson(
-  symbol: string,
-  period1: Date,
-  period2: Date,
+async function yahooFetchJson(
+  buildUrls: (session: YahooSession | null) => string[],
+  label: string,
   fetchImpl: typeof fetch,
-): Promise<YahooChartResult> {
-  const bases = [YAHOO_CHART, YAHOO_CHART_QUERY2];
+  opts: { useSession?: boolean } = {},
+): Promise<unknown> {
   let lastStatus = 0;
   let lastBody = "";
   let lastRetryAfter: number | null = null;
-  /** Up to 3 attempts with growing delay (helps brief 429 blips only). */
-  const maxAttempts = 3;
+  let lastUrl: string | null = null;
+  /** At most 2 attempts — more retries worsen bans. */
+  const maxAttempts = 2;
+  const useSession = opts.useSession !== false;
 
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
     if (attempt > 0) {
-      // ~2s, ~6s — still won't beat a multi-hour ban
-      const wait =
-        lastRetryAfter != null && lastRetryAfter > 0 && lastRetryAfter < 30
+      // Only short blip wait; long bans are handled by app cool-down
+      await sleep(
+        lastRetryAfter != null && lastRetryAfter > 0 && lastRetryAfter < 15
           ? lastRetryAfter * 1000
-          : 2000 * Math.pow(3, attempt - 1);
-      await sleep(wait);
+          : 1500,
+      );
+      if (lastStatus === 401 || lastStatus === 403) {
+        clearYahooSession();
+      }
     }
 
-    for (const base of bases) {
-      const url = new URL(`${base}/${encodeURIComponent(symbol)}`);
-      url.searchParams.set("interval", "1d");
-      url.searchParams.set(
-        "period1",
-        String(Math.floor(period1.getTime() / 1000)),
-      );
-      url.searchParams.set(
-        "period2",
-        String(Math.floor(period2.getTime() / 1000)),
-      );
-      url.searchParams.set("events", "div|split");
-      url.searchParams.set("includePrePost", "false");
+    const session = useSession
+      ? await ensureYahooSession(fetchImpl)
+      : null;
+    const urls = buildUrls(session);
+    const headers = authHeaders(session);
 
+    for (const url of urls) {
+      lastUrl = stripYahooCrumb(url);
       let res: Response;
       try {
-        res = await fetchImpl(url.toString(), {
-          headers: YAHOO_HEADERS,
+        res = await fetchImpl(url, {
+          headers,
           redirect: "follow",
         });
       } catch (e) {
@@ -170,39 +574,173 @@ async function fetchChartJson(
       }
       lastStatus = res.status;
       if (res.ok) {
-        return (await res.json()) as YahooChartResult;
+        return await res.json();
       }
       const ra = parseRetryAfterSeconds(res);
       if (ra != null) lastRetryAfter = ra;
       lastBody = (await res.text().catch(() => "")).slice(0, 200);
-      // try next host on soft blocks
+      // Invalid cookie/crumb — refresh session next attempt
+      if (
+        (res.status === 401 || res.status === 403) &&
+        /crumb|cookie/i.test(lastBody)
+      ) {
+        clearYahooSession();
+      }
       if (![401, 403, 429].includes(res.status)) {
         break;
       }
     }
 
-    // Only retry on rate limit / auth blips
     if (lastStatus !== 429 && lastStatus !== 401 && lastStatus !== 403) {
       break;
     }
   }
 
+  const urlNote = lastUrl ? ` URL: ${lastUrl}` : "";
   if (lastStatus === 401 || lastStatus === 403) {
     throw new YahooHttpError(
-      `Yahoo blocked the request for ${symbol} (HTTP ${lastStatus}). This can last a long time. Prefer imported dividend/DRP rows from Sharesight/broker; Yahoo is optional for DRP check.`,
-      { status: lastStatus, symbol, retryAfterSeconds: lastRetryAfter },
+      `Yahoo blocked the request for ${label} (HTTP ${lastStatus}). Wait out cool-down; use cached prices. Import dividends/DRP from broker if needed.${urlNote}`,
+      {
+        status: lastStatus,
+        symbol: label,
+        // Long default — IP bans are often hours
+        retryAfterSeconds: lastRetryAfter ?? 60 * 60,
+        url: lastUrl,
+      },
     );
   }
   if (lastStatus === 429) {
     throw new YahooHttpError(
-      `Yahoo rate-limited ${symbol} (HTTP 429). Bans often last much longer than a minute (sometimes hours). Stop bulk “Refresh”, use cached data if any, or import cash dividends / DRP from Sharesight or your broker instead of Yahoo.`,
-      { status: 429, symbol, retryAfterSeconds: lastRetryAfter },
+      `Yahoo rate-limited ${label} (HTTP 429). Cool-down active — do not force-refresh. Holdings keep using quote_cache.${urlNote}`,
+      {
+        status: 429,
+        symbol: label,
+        retryAfterSeconds: lastRetryAfter ?? 60 * 60,
+        url: lastUrl,
+      },
     );
   }
   throw new YahooHttpError(
-    `Yahoo chart failed for ${symbol}: HTTP ${lastStatus}${lastBody ? ` — ${lastBody}` : ""}`,
-    { status: lastStatus || 0, symbol, retryAfterSeconds: lastRetryAfter },
+    `Yahoo request failed for ${label}: HTTP ${lastStatus}${lastBody ? ` — ${lastBody}` : ""}${urlNote}`,
+    {
+      status: lastStatus || 0,
+      symbol: label,
+      retryAfterSeconds: lastRetryAfter,
+      url: lastUrl,
+    },
   );
+}
+
+async function fetchChartJson(
+  symbol: string,
+  period1: Date,
+  period2: Date,
+  fetchImpl: typeof fetch,
+): Promise<YahooChartResult> {
+  return (await yahooFetchJson(
+    (session) =>
+      [YAHOO_CHART, YAHOO_CHART_QUERY2].map((base) => {
+        const url = new URL(`${base}/${encodeURIComponent(symbol)}`);
+        url.searchParams.set("interval", "1d");
+        url.searchParams.set(
+          "period1",
+          String(Math.floor(period1.getTime() / 1000)),
+        );
+        url.searchParams.set(
+          "period2",
+          String(Math.floor(period2.getTime() / 1000)),
+        );
+        url.searchParams.set("events", "div|split");
+        url.searchParams.set("includePrePost", "false");
+        if (session?.crumb) url.searchParams.set("crumb", session.crumb);
+        return url.toString();
+      }),
+    symbol,
+    fetchImpl,
+  )) as YahooChartResult;
+}
+
+/**
+ * Bulk latest quotes for many Yahoo symbols (one HTTP call per chunk).
+ * Prefer this over N× single chart/quote calls. Uses crumb session.
+ */
+export async function fetchYahooQuotesBulk(
+  symbols: string[],
+  options: { fetchImpl?: typeof fetch; chunkSize?: number } = {},
+): Promise<Map<string, YahooQuoteSnapshot>> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const out = new Map<string, YahooQuoteSnapshot>();
+  const chunks = chunkSymbols(symbols, options.chunkSize ?? YAHOO_BULK_CHUNK);
+  if (!chunks.length) return out;
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i]!;
+    if (i > 0) await sleep(500);
+    const joined = chunk.join(",");
+    const data = await yahooFetchJson(
+      (session) =>
+        [YAHOO_QUOTE, YAHOO_QUOTE_Q2].map((base) => {
+          const url = new URL(base);
+          url.searchParams.set("symbols", joined);
+          url.searchParams.set(
+            "fields",
+            "regularMarketPrice,currency,symbol",
+          );
+          if (session?.crumb) url.searchParams.set("crumb", session.crumb);
+          return url.toString();
+        }),
+      `bulk-quote(${chunk.length})`,
+      fetchImpl,
+    );
+    for (const [sym, snap] of parseYahooQuotePayload(data)) {
+      out.set(sym, snap);
+    }
+  }
+  return out;
+}
+
+/**
+ * Bulk daily close history via spark API (one HTTP call per chunk).
+ * Returns simplified bars (close only; OHLC filled with close).
+ * Heavy — only call when history is needed (performance chart), not every price refresh.
+ */
+export async function fetchYahooSparkHistoryBulk(
+  symbols: string[],
+  options: {
+    /** Yahoo spark range, e.g. 1y, 2y, 5y */
+    range?: string;
+    fetchImpl?: typeof fetch;
+    chunkSize?: number;
+  } = {},
+): Promise<Map<string, PriceBar[]>> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const range = options.range ?? "1y";
+  const out = new Map<string, PriceBar[]>();
+  const chunks = chunkSymbols(symbols, options.chunkSize ?? YAHOO_BULK_CHUNK);
+  if (!chunks.length) return out;
+
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i]!;
+    if (i > 0) await sleep(500);
+    const joined = chunk.join(",");
+    const data = await yahooFetchJson(
+      (session) =>
+        [YAHOO_SPARK, YAHOO_SPARK_Q2].map((base) => {
+          const url = new URL(base);
+          url.searchParams.set("symbols", joined);
+          url.searchParams.set("range", range);
+          url.searchParams.set("interval", "1d");
+          if (session?.crumb) url.searchParams.set("crumb", session.crumb);
+          return url.toString();
+        }),
+      `bulk-spark(${chunk.length})`,
+      fetchImpl,
+    );
+    for (const [sym, bars] of parseYahooSparkPayload(data)) {
+      out.set(sym, bars);
+    }
+  }
+  return out;
 }
 
 /**
@@ -231,35 +769,22 @@ export async function fetchYahooHistory(
       `Yahoo history error for ${symbol}: ${data.chart.error.description ?? "unknown"}`,
     );
   }
-
-  const result = data.chart?.result?.[0];
-  if (!result?.timestamp?.length) return [];
-
-  const quote = result.indicators?.quote?.[0];
-  const adj = result.indicators?.adjclose?.[0]?.adjclose;
-
-  const bars: PriceBar[] = [];
-  for (let i = 0; i < result.timestamp.length; i++) {
-    const close = quote?.close?.[i];
-    if (close == null || Number.isNaN(close)) continue;
-    const d = new Date(result.timestamp[i]! * 1000);
-    bars.push({
-      date: d.toISOString().slice(0, 10),
-      open: quote?.open?.[i] ?? close,
-      high: quote?.high?.[i] ?? close,
-      low: quote?.low?.[i] ?? close,
-      close,
-      adjClose: adj?.[i] ?? close,
-      volume: quote?.volume?.[i] ?? 0,
-    });
-  }
-  return bars;
+  const parsed = parseYahooChartPayload(data, symbol);
+  return parsed?.bars ?? [];
 }
 
 export async function fetchYahooQuote(
   ticker: string,
   options: { exchange?: string; fetchImpl?: typeof fetch } = {},
 ): Promise<number | null> {
+  const symbol = toYahooSymbol(ticker, options.exchange ?? "ASX");
+  // Always prefer the multi-symbol quote endpoint (even for one symbol).
+  const map = await fetchYahooQuotesBulk([symbol], {
+    fetchImpl: options.fetchImpl,
+  });
+  const hit = map.get(symbol.toUpperCase());
+  if (hit) return hit.price;
+  // Fallback: short chart history
   const bars = await fetchYahooHistory(ticker, {
     ...options,
     period1: new Date(Date.now() - 1000 * 60 * 60 * 24 * 14),
@@ -275,12 +800,34 @@ export async function fetchFxToAud(
 ): Promise<{ pair: string; rate: number } | null> {
   const pair = fxYahooSymbol(currency);
   if (!pair) return null;
-  const rate = await fetchYahooQuote(pair, {
-    exchange: "FX",
+  const map = await fetchYahooQuotesBulk([pair], {
     fetchImpl: options.fetchImpl,
   });
-  if (rate == null) return null;
-  return { pair, rate };
+  const hit = map.get(pair.toUpperCase());
+  if (hit) return { pair, rate: hit.price };
+  return null;
+}
+
+/**
+ * Bulk FX pairs for several currencies → AUD (one quote call when possible).
+ */
+export async function fetchFxToAudBulk(
+  currencies: string[],
+  options: { fetchImpl?: typeof fetch } = {},
+): Promise<Map<string, { pair: string; rate: number }>> {
+  const pairs: string[] = [];
+  for (const c of currencies) {
+    const p = fxYahooSymbol(c);
+    if (p) pairs.push(p);
+  }
+  const map = await fetchYahooQuotesBulk(pairs, {
+    fetchImpl: options.fetchImpl,
+  });
+  const out = new Map<string, { pair: string; rate: number }>();
+  for (const [sym, snap] of map) {
+    out.set(sym, { pair: sym, rate: snap.price });
+  }
+  return out;
 }
 
 /**

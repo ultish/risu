@@ -5,14 +5,22 @@ import {
   computeHoldings,
   defaultAllocationTemplates,
   defaultCurrencyForExchange,
-  fetchFxToAud,
+  fetchFxHistory,
+  fetchFxMulti,
+  fetchNasdaqHistory,
+  fetchQuotesMulti,
+  buildYahooChartHistoryUrl,
+  buildYahooQuoteUrl,
+  buildYahooSparkHistoryUrl,
   fetchYahooDividends,
   fetchYahooHistory,
+  fetchYahooSparkHistoryBulk,
   fetchYahooQuote,
   holdingPriceKey,
   listInstrumentSeeds,
   parseBrokerFile,
   parseSharesightPaste,
+  parseYahooManualPayload,
   resolveInstrumentAssumptions,
   resolveInstrumentFromSeed,
   runScenario,
@@ -1089,31 +1097,29 @@ app.post("/api/prices/refresh", async (c) => {
       instruments?: Array<{ ticker: string; exchange: string }>;
       /** Bypass cool-down (UI should confirm). Still records new 429s. */
       force?: boolean;
+      /**
+       * Also fetch 1y spark history for performance chart.
+       * Default false — quotes-only is much lighter while banned/fragile.
+       */
+      includeHistory?: boolean;
     }>()
     .catch(
       () =>
         ({} as {
           instruments?: Array<{ ticker: string; exchange: string }>;
           force?: boolean;
+          includeHistory?: boolean;
         }),
     );
 
   const force = body.force === true;
-  try {
-    assertYahooAllowed(db, { force });
-  } catch (e) {
-    const st = getYahooStatus(db);
-    return c.json(
-      {
-        error: e instanceof Error ? e.message : String(e),
-        yahoo: st,
-        refreshed: 0,
-        results: [],
-        yahooCircuitOpen: true,
-        note: st.note,
-      },
-      429,
-    );
+  const includeHistory = body.includeHistory === true;
+  // Cool-down gates Yahoo only — we still refresh via ASX/Nasdaq/FX fallbacks
+  const yahooStatusBefore = getYahooStatus(db);
+  const yahooAllowed =
+    force || yahooStatusBefore.waitSeconds <= 0;
+  if (!yahooAllowed) {
+    // soft note only; continue with fallbacks
   }
 
   recordYahooRefreshStarted(db);
@@ -1130,6 +1136,7 @@ app.post("/api/prices/refresh", async (c) => {
     exchange: string;
     symbol: string;
     price: number | null;
+    source?: string;
     error?: string;
   }> = [];
 
@@ -1152,121 +1159,545 @@ app.post("/api/prices/refresh", async (c) => {
   const currencies = db
     .prepare("SELECT DISTINCT currency FROM transactions")
     .all() as Array<{ currency: string }>;
-  /** Yahoo 429s hard if we hammer — be polite; abort bulk after consecutive failures */
-  const delayMs = 900;
-  let consecutiveYahooFails = 0;
-  let yahooCircuitOpen = false;
 
-  for (const { currency } of currencies) {
-    if (!currency || currency.toUpperCase() === "AUD") continue;
-    if (yahooCircuitOpen) break;
-    try {
-      const fx = await fetchFxToAud(currency);
-      if (fx) {
-        upsertFx.run(fx.pair, fx.rate);
-        consecutiveYahooFails = 0;
-      }
-      await sleep(delayMs);
-    } catch (e) {
-      consecutiveYahooFails += 1;
-      recordYahooFailure(db, e);
-      const msg = e instanceof Error ? e.message : String(e);
-      if (msg.includes("429") || consecutiveYahooFails >= 3) {
-        yahooCircuitOpen = true;
-      }
-    }
-  }
-  if (!yahooCircuitOpen) {
-    try {
-      const fx = await fetchFxToAud("USD");
-      if (fx) {
-        upsertFx.run(fx.pair, fx.rate);
-        recordYahooSuccess(db);
-      }
-      await sleep(delayMs);
-    } catch (e) {
-      recordYahooFailure(db, e);
-    }
-  }
+  let yahooCircuitOpen = !yahooAllowed;
+  let anyLiveSuccess = false;
+  const sourcesUsed: string[] = [];
+  const equitySymbols: string[] = [];
+  const instrumentMeta: Array<{
+    ticker: string;
+    exchange: string;
+    symbol: string;
+  }> = [];
 
   for (const inst of instruments) {
     const exchange = (inst.exchange || "ASX").toUpperCase();
     const ticker = inst.ticker.toUpperCase();
     const symbol = toYahooSymbol(ticker, exchange);
-    if (yahooCircuitOpen) {
-      results.push({
-        ticker,
-        exchange,
-        symbol,
-        price: null,
-        error:
-          "Skipped: Yahoo rate-limit circuit open after repeated 429s. Wait hours or use cached quotes; avoid bulk refresh.",
-      });
-      continue;
+    instrumentMeta.push({ ticker, exchange, symbol });
+    equitySymbols.push(symbol);
+  }
+
+  const ccyList = [
+    ...new Set([
+      ...currencies.map((r) => (r.currency || "").toUpperCase()),
+      "USD",
+    ]),
+  ].filter((c) => c && c !== "AUD");
+
+  // ── Equity quotes: Yahoo (if allowed) + ASX/Nasdaq fallbacks ──
+  let quoteMap = new Map<
+    string,
+    {
+      symbol: string;
+      price: number;
+      currency: string | null;
+      source?: string;
     }
-    try {
-      const currency = defaultCurrencyForExchange(exchange);
-      // One chart call covers recent price (history) — avoid double quote+history
-      const history = await fetchYahooHistory(ticker, {
-        exchange,
-        period1: new Date(Date.now() - 1000 * 60 * 60 * 24 * 365),
-      });
-      const price =
-        history.length > 0 ? history[history.length - 1]!.close : null;
-      if (price != null) upsertQuote.run(symbol, price, currency);
-      const insertBars = db.transaction((bars: typeof history) => {
-        for (const b of bars) {
-          upsertBar.run(
-            symbol,
-            b.date,
-            b.open,
-            b.high,
-            b.low,
-            b.close,
-            b.adjClose,
-            b.volume,
-          );
-        }
-      });
-      insertBars(history);
-      results.push({ ticker, exchange, symbol, price });
-      consecutiveYahooFails = 0;
-      if (price != null) recordYahooSuccess(db);
-      await sleep(delayMs);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      consecutiveYahooFails += 1;
-      recordYahooFailure(db, e);
-      if (msg.includes("429") || consecutiveYahooFails >= 3) {
-        yahooCircuitOpen = true;
-      }
-      results.push({
-        ticker,
-        exchange,
-        symbol,
-        price: null,
-        error: msg,
-      });
-      await sleep(delayMs);
+  >();
+  try {
+    const multi = await fetchQuotesMulti(instrumentMeta, {
+      tryYahoo: yahooAllowed,
+    });
+    for (const [sym, snap] of multi.quotes) {
+      quoteMap.set(sym.toUpperCase(), snap);
+    }
+    sourcesUsed.push(...multi.sourcesUsed);
+    if (multi.quotes.size) anyLiveSuccess = true;
+    if (multi.yahooError) {
+      recordYahooFailure(db, new Error(multi.yahooError));
+      yahooCircuitOpen = true;
+    } else if (yahooAllowed && multi.sourcesUsed.includes("yahoo")) {
+      // Yahoo portion worked
+    }
+  } catch (e) {
+    recordYahooFailure(db, e);
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/429|rate-limit|blocked|HTTP 401|HTTP 403/i.test(msg)) {
+      yahooCircuitOpen = true;
     }
   }
 
-  // Also trip cool-down if circuit opened mid-run without a thrown 429 on last item
-  if (yahooCircuitOpen) {
-    const any429 = results.some((r) => r.error && /429|rate-limit/i.test(r.error));
-    if (any429) {
-      /* already recorded via recordYahooFailure */
+  // ── FX: latest + multi-year daily history (performance chart) ──
+  const upsertFxHist = db.prepare(
+    `INSERT INTO fx_history (pair, date, rate) VALUES (?, ?, ?)
+     ON CONFLICT(pair, date) DO UPDATE SET rate = excluded.rate`,
+  );
+  try {
+    const fx = await fetchFxMulti(ccyList, { tryYahoo: yahooAllowed });
+    for (const { pair, rate, source } of fx.rates.values()) {
+      upsertFx.run(pair, rate);
+      // Seed today's rate into history so as-of always has a point
+      upsertFxHist.run(
+        pair,
+        new Date().toISOString().slice(0, 10),
+        rate,
+      );
+      if (!sourcesUsed.includes(source)) sourcesUsed.push(source);
+    }
+    if (fx.rates.size) anyLiveSuccess = true;
+    if (fx.yahooError) {
+      recordYahooFailure(db, new Error(fx.yahooError));
+      yahooCircuitOpen = true;
+    }
+  } catch (e) {
+    recordYahooFailure(db, e);
+  }
+
+  // Daily FX history (default ~10y) when history requested or cache is empty
+  const needFxHist =
+    includeHistory ||
+    (
+      db.prepare("SELECT COUNT(*) AS c FROM fx_history").get() as { c: number }
+    ).c < 30;
+  if (needFxHist && ccyList.length) {
+    const pairs = [
+      ...new Set(
+        ccyList
+          .map((c) => {
+            const u = c.toUpperCase();
+            if (u === "USD") return "AUDUSD=X";
+            if (u === "GBP") return "AUDGBP=X";
+            if (u === "EUR") return "AUDEUR=X";
+            return u.length === 3 ? `AUD${u}=X` : null;
+          })
+          .filter((p): p is string => Boolean(p)),
+      ),
+    ];
+    // Always ensure AUDUSD when any non-AUD book exists
+    if (!pairs.includes("AUDUSD=X") && ccyList.some((c) => c !== "AUD")) {
+      pairs.push("AUDUSD=X");
+    }
+    const period2 = new Date();
+    const period1 = new Date(
+      period2.getTime() - 1000 * 60 * 60 * 24 * 365 * 10,
+    );
+    for (const pair of pairs) {
+      try {
+        const hist = await fetchFxHistory(pair, {
+          period1,
+          period2,
+          tryYahoo: yahooAllowed && !yahooCircuitOpen,
+        });
+        if (!hist.points.length) continue;
+        const writeFx = db.transaction(() => {
+          for (const pt of hist.points) {
+            upsertFxHist.run(pair, pt.date, pt.rate);
+          }
+          const last = hist.points[hist.points.length - 1]!;
+          upsertFx.run(pair, last.rate);
+        });
+        writeFx();
+        anyLiveSuccess = true;
+        if (hist.source && !sourcesUsed.includes(hist.source)) {
+          sourcesUsed.push(hist.source);
+        }
+      } catch (e) {
+        recordYahooFailure(db, e);
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/429|rate-limit|blocked|HTTP 401|HTTP 403/i.test(msg)) {
+          yahooCircuitOpen = true;
+        }
+      }
     }
   }
+
+  // ── Optional Yahoo 1y history (performance chart → price_cache) ──
+  // Spark bulk first; chart API per symbol for any gaps (chart is often less blocked).
+  let historyMap = new Map<
+    string,
+    Array<{
+      date: string;
+      open: number;
+      high: number;
+      low: number;
+      close: number;
+      adjClose: number;
+      volume: number;
+    }>
+  >();
+  if (yahooAllowed && includeHistory && equitySymbols.length) {
+    // Spark bulk (when available) — skip if circuit already open from quotes
+    if (!yahooCircuitOpen) {
+      try {
+        historyMap = await fetchYahooSparkHistoryBulk(equitySymbols, {
+          range: "1y",
+        });
+        if (historyMap.size) {
+          anyLiveSuccess = true;
+          if (!sourcesUsed.includes("yahoo")) sourcesUsed.push("yahoo");
+        }
+      } catch (e) {
+        recordYahooFailure(db, e);
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/429|rate-limit|blocked|HTTP 401|HTTP 403/i.test(msg)) {
+          yahooCircuitOpen = true;
+        }
+      }
+    }
+
+    // Chart API per missing symbol — often works in browser when spark/quote fail
+    const needChart = instrumentMeta.filter((m) => {
+      const bars = historyMap.get(m.symbol.toUpperCase());
+      return !bars?.length;
+    });
+    const batchSize = 4;
+    const period2 = new Date();
+    const period1 = new Date(period2.getTime() - 1000 * 60 * 60 * 24 * 365);
+    let chartStopped = false;
+    for (let i = 0; i < needChart.length && !chartStopped; i += batchSize) {
+      const batch = needChart.slice(i, i + batchSize);
+      if (i > 0) await new Promise((r) => setTimeout(r, 300));
+      const outcomes = await Promise.all(
+        batch.map(async (m) => {
+          try {
+            const bars = await fetchYahooHistory(m.ticker, {
+              exchange: m.exchange,
+              period1,
+              period2,
+            });
+            return { m, bars, error: null as Error | null };
+          } catch (e) {
+            return {
+              m,
+              bars: [] as Awaited<ReturnType<typeof fetchYahooHistory>>,
+              error: e instanceof Error ? e : new Error(String(e)),
+            };
+          }
+        }),
+      );
+      for (const { m, bars, error } of outcomes) {
+        if (bars.length) {
+          historyMap.set(m.symbol.toUpperCase(), bars);
+          anyLiveSuccess = true;
+          if (!sourcesUsed.includes("yahoo-chart")) {
+            sourcesUsed.push("yahoo-chart");
+          }
+          // Chart worked — clear soft circuit from earlier quote/spark noise
+          yahooCircuitOpen = false;
+        } else if (error) {
+          recordYahooFailure(db, error);
+          const msg = error.message;
+          if (/429|rate-limit|blocked|HTTP 401|HTTP 403/i.test(msg)) {
+            yahooCircuitOpen = true;
+            chartStopped = true;
+          }
+        }
+      }
+    }
+  }
+
+  // Clear Yahoo cool-down only if Yahoo itself succeeded (not just fallbacks)
+  const yahooLive =
+    sourcesUsed.includes("yahoo") || sourcesUsed.includes("yahoo-chart");
+  if (anyLiveSuccess && yahooLive && !yahooCircuitOpen) {
+    recordYahooSuccess(db);
+  }
+
+  // ── Fallback history for performance chart (price_cache) ──
+  // Chart reads price_cache daily bars — last-price quote_cache alone is not enough.
+  const usForHist = instrumentMeta.filter((m) => {
+    const isUs =
+      m.exchange === "US" ||
+      m.exchange === "NASDAQ" ||
+      m.exchange === "NYSE" ||
+      m.exchange === "AMEX";
+    return isUs && !historyMap.has(m.symbol.toUpperCase());
+  });
+  if (usForHist.length) {
+    const batchSize = 4;
+    for (let i = 0; i < usForHist.length; i += batchSize) {
+      const batch = usForHist.slice(i, i + batchSize);
+      await Promise.all(
+        batch.map(async (m) => {
+          const bars = await fetchNasdaqHistory(m.ticker);
+          if (bars.length) {
+            historyMap.set(m.symbol.toUpperCase(), bars);
+            if (!sourcesUsed.includes("nasdaq-hist")) {
+              sourcesUsed.push("nasdaq-hist");
+            }
+          }
+        }),
+      );
+    }
+  }
+
+  // ── Write caches + build per-instrument results ──
+  const insertBars = db.transaction(
+    (
+      symbol: string,
+      bars: Array<{
+        date: string;
+        open: number;
+        high: number;
+        low: number;
+        close: number;
+        adjClose: number;
+        volume: number;
+      }>,
+    ) => {
+      for (const b of bars) {
+        upsertBar.run(
+          symbol,
+          b.date,
+          b.open,
+          b.high,
+          b.low,
+          b.close,
+          b.adjClose,
+          b.volume,
+        );
+      }
+    },
+  );
+
+  const todayIso = new Date().toISOString().slice(0, 10);
+
+  for (const { ticker, exchange, symbol } of instrumentMeta) {
+    const currency = defaultCurrencyForExchange(exchange);
+    const q = quoteMap.get(symbol.toUpperCase());
+    let history = historyMap.get(symbol.toUpperCase()) ?? [];
+    let price =
+      q?.price ??
+      (history.length > 0 ? history[history.length - 1]!.close : null);
+    const source = q?.source ?? (history.length ? "yahoo" : undefined);
+
+    if (price != null) {
+      upsertQuote.run(symbol, price, q?.currency ?? currency);
+      // Seed / refresh today's bar so the performance chart can mark-to-market
+      // (ASX fallbacks only have a last price — no multi-year free history).
+      if (!history.length) {
+        history = [
+          {
+            date: todayIso,
+            open: price,
+            high: price,
+            low: price,
+            close: price,
+            adjClose: price,
+            volume: 0,
+          },
+        ];
+      } else {
+        const last = history[history.length - 1]!;
+        if (last.date < todayIso) {
+          history = [
+            ...history,
+            {
+              date: todayIso,
+              open: price,
+              high: price,
+              low: price,
+              close: price,
+              adjClose: price,
+              volume: 0,
+            },
+          ];
+        } else if (last.date === todayIso && q?.price != null) {
+          history = [
+            ...history.slice(0, -1),
+            { ...last, close: price, adjClose: price },
+          ];
+        }
+      }
+    }
+    if (history.length) {
+      insertBars(symbol, history);
+      if (price == null) price = history[history.length - 1]!.close;
+    }
+
+    results.push({
+      ticker,
+      exchange,
+      symbol,
+      price,
+      source,
+      error:
+        price == null
+          ? "No quote from Yahoo or fallbacks (ASX Markit / Nasdaq)"
+          : undefined,
+    });
+  }
+
+  const okCount = results.filter((r) => r.price != null).length;
+  const srcLabel = sourcesUsed.length
+    ? sourcesUsed.join("+")
+    : "none";
+
+  const yahooBrowserUrls = {
+    spark: equitySymbols.length
+      ? buildYahooSparkHistoryUrl(equitySymbols, "1y")
+      : null,
+    chart:
+      equitySymbols.length === 1
+        ? buildYahooChartHistoryUrl(equitySymbols[0]!)
+        : equitySymbols[0]
+          ? buildYahooChartHistoryUrl(equitySymbols[0]!)
+          : null,
+    quote: equitySymbols.length
+      ? buildYahooQuoteUrl(equitySymbols)
+      : null,
+  };
 
   return c.json({
     refreshed: results.length,
+    ok: okCount,
     results,
     yahooCircuitOpen,
     yahoo: getYahooStatus(db),
-    note: yahooCircuitOpen
-      ? "Yahoo rate-limited mid-refresh. Cached prices remain; wait for cool-down shown in the UI."
-      : undefined,
+    yahooSkipped: !yahooAllowed,
+    sources: sourcesUsed,
+    mode: includeHistory ? "quotes+history" : "quotes",
+    includeHistory,
+    /** Open these in a browser when Node is 429'd; paste JSON via POST /api/prices/import-yahoo */
+    yahooBrowserUrls,
+    note: !anyLiveSuccess
+      ? "No live quotes. Yahoo may be banned; fallbacks also failed. Cache unchanged."
+      : yahooCircuitOpen || !yahooAllowed
+        ? `Refreshed ${okCount}/${results.length} via ${srcLabel}` +
+          (yahooAllowed
+            ? " (Yahoo blocked — used fallbacks where possible). Performance chart uses price history when available."
+            : " (Yahoo cool-down — fallbacks). Re-open Holdings to refresh the chart.") +
+          " Open yahooBrowserUrls.spark in a browser and paste JSON via Settings / risu.importYahoo."
+        : `Refreshed ${okCount}/${results.length} via ${srcLabel}` +
+          (includeHistory ? " + 1y Yahoo history" : ""),
+  });
+});
+
+/**
+ * Manually import Yahoo chart / spark / quote JSON (paste from browser).
+ * Bypasses cool-down — used when Node gets 429 but the browser still works.
+ *
+ * Body: { payload: object|string, symbol?: string }
+ * Console: risu.importYahoo(json) or risu.importYahoo(json, "TSLA")
+ */
+app.post("/api/prices/import-yahoo", async (c) => {
+  const body = await c.req
+    .json<{ payload?: unknown; json?: unknown; symbol?: string }>()
+    .catch(() => ({} as { payload?: unknown; json?: unknown; symbol?: string }));
+
+  let raw = body.payload ?? body.json;
+  if (typeof raw === "string") {
+    try {
+      raw = JSON.parse(raw);
+    } catch {
+      return c.json({ error: "payload string is not valid JSON" }, 400);
+    }
+  }
+  if (raw == null || typeof raw !== "object") {
+    return c.json(
+      {
+        error:
+          "Body must include payload (Yahoo chart/spark/quote JSON object or string).",
+      },
+      400,
+    );
+  }
+
+  let parsed: ReturnType<typeof parseYahooManualPayload>;
+  try {
+    parsed = parseYahooManualPayload(raw, body.symbol);
+  } catch (e) {
+    return c.json(
+      { error: e instanceof Error ? e.message : String(e) },
+      400,
+    );
+  }
+
+  const upsertQuote = db.prepare(
+    `INSERT INTO quote_cache (symbol, price, currency, fetched_at) VALUES (?, ?, ?, datetime('now'))
+     ON CONFLICT(symbol) DO UPDATE SET price = excluded.price, currency = excluded.currency, fetched_at = excluded.fetched_at`,
+  );
+  const upsertBar = db.prepare(
+    `INSERT INTO price_cache (symbol, date, open, high, low, close, adj_close, volume)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(symbol, date) DO UPDATE SET
+       open=excluded.open, high=excluded.high, low=excluded.low,
+       close=excluded.close, adj_close=excluded.adj_close, volume=excluded.volume`,
+  );
+  const upsertFx = db.prepare(
+    `INSERT INTO fx_cache (pair, rate, fetched_at) VALUES (?, ?, datetime('now'))
+     ON CONFLICT(pair) DO UPDATE SET rate = excluded.rate, fetched_at = excluded.fetched_at`,
+  );
+  const upsertFxHist = db.prepare(
+    `INSERT INTO fx_history (pair, date, rate) VALUES (?, ?, ?)
+     ON CONFLICT(pair, date) DO UPDATE SET rate = excluded.rate`,
+  );
+
+  let barCount = 0;
+  let quoteCount = 0;
+  let fxDays = 0;
+  const symbols: string[] = [];
+
+  const write = db.transaction(() => {
+    for (const [symbol, bars] of parsed.barsBySymbol) {
+      symbols.push(symbol);
+      const isFx = symbol.includes("=X") || symbol.includes("=x");
+      for (const b of bars) {
+        upsertBar.run(
+          symbol,
+          b.date,
+          b.open,
+          b.high,
+          b.low,
+          b.close,
+          b.adjClose,
+          b.volume,
+        );
+        barCount++;
+        if (isFx && b.close > 0) {
+          upsertFxHist.run(symbol.toUpperCase(), b.date, b.close);
+          fxDays++;
+        }
+      }
+      if (isFx && bars.length) {
+        const last = bars[bars.length - 1]!;
+        upsertFx.run(symbol.toUpperCase(), last.close);
+      }
+    }
+    for (const [symbol, q] of parsed.quotes) {
+      if (!symbols.includes(symbol)) symbols.push(symbol);
+      upsertQuote.run(symbol, q.price, q.currency);
+      quoteCount++;
+      if (symbol.includes("=X") || symbol.includes("=x")) {
+        upsertFx.run(symbol.toUpperCase(), q.price);
+        upsertFxHist.run(
+          symbol.toUpperCase(),
+          new Date().toISOString().slice(0, 10),
+          q.price,
+        );
+        fxDays++;
+      }
+      // Seed a single bar if quote-only paste
+      if (!parsed.barsBySymbol.get(symbol)?.length) {
+        const today = new Date().toISOString().slice(0, 10);
+        upsertBar.run(
+          symbol,
+          today,
+          q.price,
+          q.price,
+          q.price,
+          q.price,
+          q.price,
+          0,
+        );
+        barCount++;
+      }
+    }
+  });
+  write();
+
+  return c.json({
+    ok: true,
+    kind: parsed.kind,
+    symbols,
+    barsWritten: barCount,
+    quotesWritten: quoteCount,
+    fxHistoryDays: fxDays,
+    note:
+      "Imported into price_cache / quote_cache" +
+      (fxDays ? " / fx_history" : "") +
+      ". Re-open Holdings or bump the performance chart to reload.",
   });
 });
 
@@ -1413,6 +1844,7 @@ app.delete("/api/settings/caches", (c) => {
     price_cache: db.prepare("DELETE FROM price_cache").run().changes,
     dividend_cache: db.prepare("DELETE FROM dividend_cache").run().changes,
     fx_cache: db.prepare("DELETE FROM fx_cache").run().changes,
+    fx_history: db.prepare("DELETE FROM fx_history").run().changes,
   };
   return c.json({ ok: true, deleted });
 });
@@ -1885,7 +2317,4 @@ function inferCustodyFromParser(parser: string): string | null {
 
 function round2(n: number) {
   return Math.round(n * 100) / 100;
-}
-function sleep(ms: number) {
-  return new Promise((r) => setTimeout(r, ms));
 }

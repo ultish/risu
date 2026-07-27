@@ -9,15 +9,27 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ### Added
 - Planner instrument fill: BetaShares/Vanguard **seed** + optional manual **Refresh** (Yahoo trailing yield / hist. growth estimate); SQLite `instrument_cache` (once per click, not on page load)
+- **Manual Yahoo paste import**: when Node is 429’d, open browser URL → paste chart/spark/quote JSON via **Settings**, `POST /api/prices/import-yahoo`, or console `yields.importYahoo(json)` (also `yields.sparkUrl` / `yields.chartUrl`)
+- Yahoo failures and refresh responses include **lastUrl** / **yahooBrowserUrls** (spark, chart, quote) so you can open the same request in a browser
+- **Daily FX history cache** (`fx_history`): ~10y `AUDUSD=X` (etc.) from Yahoo chart or Frankfurter range; performance chart uses as-of rates; latest still in `fx_cache`; paste `AUDUSD=X` chart also fills history
 
 ### Changed
+- **Nav URLs**: main tabs (and import/tax sub-modes) sync to query params — e.g. `?tab=planner`, `?tab=import&import=paste`, `?tab=tax&tax=drp` (copyable; browser back works)
+- **Product name: Risu** (りす) — UI title, favicon/icon, console `risu.*` (legacy `yields.*` alias), backup `risu-YYYY-MM-DD.db`
+- **Backup DB** download filename is `risu-YYYY-MM-DD.db` (UTC date)
+- **Performance chart** uses **Recharts** (hover tooltips with cost / value / gap; brush to zoom time range) instead of static SVG
+- **Holdings MTM currency**: market value uses **exchange quote currency** (US→USD) then FX to AUD; ledger `currency=AUD` only applies to cost (Sharesight stored AUD cost)
+- **Split-adjusted MTM**: market value uses ledger qty × product of **later** Sharesight split ratios so Yahoo split-adjusted closes match (cost/qty display unchanged); fixes early performance green under cost
+- **Price refresh works when Yahoo is banned**: cool-down only skips Yahoo; **ASX Markit** + **Nasdaq** quote fallbacks + **Frankfurter/open.er-api FX**; bulk Yahoo when available; longer cool-downs (1h→12h)
+- **Performance chart history**: Holdings **Refresh** requests 1y history (`includeHistory`); Yahoo **spark** bulk then **chart** API per missing symbol (chart often works when spark/quote do not); still writes Nasdaq hist for US and “today” bar for ASX when Yahoo is unavailable
+- **Performance chart + fallbacks**: refresh writes **price_cache** (US 1y from Nasdaq history; ASX “today” bar from last quote); performance API merges quote_cache; chart reloads after refresh
 - **Planner / post–Jul 2027 CGT** (aligned with planning rules you care about):
   - **CPI-index cost base** each month (assumed inflation %, default 2.5% p.a., editable)
   - **No 50% CGT discount**
   - Tax rate on indexed gain = **max(MTR+Medicare, 30%)** (30% floor if MTR is low/zero; high MTR still pays full MTR, e.g. 47%)
   - Legacy 50% discount optional side-by-side only (off by default)
 - **Planner results**: at-a-glance % cards (net return, approx. CAGR, wealth growth, tax/capital, tax take of gain, portfolio multiple); $ rows show “· +X%” vs capital in; year-by-year YoY portfolio value %
-- **Switch at end**: redeploys net of one sale CGT — reuses main-sim exit CGT when phase‑1 is **Sell all at end** (no double tax); estimates CGT only when phase‑1 was **Hold**/drawdown; UI states phase‑2 **cost base resets** to net purchase (indexation restarts — no carry of phase‑1 indexed cost)
+- **Switch at end**: both paths compared at **end of year N+1** (same year); Path A = N years source → sell → year N+1 on target (monthly engine); Path B = full N+1 year target sim; sale CGT once; phase‑2 cost base resets
 - **Nav simplified** to 6 top tabs: Holdings · Transactions · Import · Tax · Planner · Settings. Import sub-modes (file / paste / manual); Tax sub-modes (profiles / DRP check); Portfolios moved under Settings
 - **Assessable dividends** (core + `GET /api/income`): include DRP/reinvest amounts as taxable income; skip DRP only when a nearby equal cash dividend exists (avoids double-count; still counts partial DRP)
 - **Planner DRP**: reinvests full gross yield into value and cost base; income tax settled outside the portfolio (was reinvest-net-of-tax, which understated compounding and cost base)

@@ -98,6 +98,14 @@ function migrate(db: Database.Database) {
       fetched_at TEXT NOT NULL
     );
 
+    /** Daily FX history (e.g. AUDUSD=X = USD per 1 AUD) for performance chart */
+    CREATE TABLE IF NOT EXISTS fx_history (
+      pair TEXT NOT NULL,
+      date TEXT NOT NULL,
+      rate REAL NOT NULL,
+      PRIMARY KEY (pair, date)
+    );
+
     CREATE TABLE IF NOT EXISTS dividend_cache (
       symbol TEXT NOT NULL,
       date TEXT NOT NULL,

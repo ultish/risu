@@ -63,6 +63,12 @@ export function normaliseExchange(raw: string): string {
   return s.slice(0, 12);
 }
 
+/**
+ * Quote currency for market prices by exchange.
+ * Operator book is mainly ASX (AUD) + US (USD). Japan exposure is via
+ * Betashares ASX products (AUD), not TSE/JPY — those tickers stay ASX/AUD.
+ * LSE/EUR/etc. kept for generality; do not remove.
+ */
 export function defaultCurrencyForExchange(exchange: string): string {
   const e = exchange.toUpperCase();
   if (e === "ASX" || e === "AU") return "AUD";
@@ -75,7 +81,10 @@ function looksAsxTicker(ticker: string): boolean {
   return /^[A-Z0-9]{2,5}$/.test(ticker) && !ticker.includes(".");
 }
 
-/** Yahoo FX pair for converting foreign currency → AUD */
+/**
+ * Yahoo FX pair for converting foreign currency → AUD.
+ * Day-to-day need is AUDUSD only; GBP/EUR/generic kept for other books.
+ */
 export function fxYahooSymbol(currency: string): string | null {
   const c = currency.toUpperCase();
   if (c === "AUD") return null;

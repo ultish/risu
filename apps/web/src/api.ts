@@ -214,6 +214,7 @@ export type YahooStatus = {
   blockedUntil: number | null;
   waitSeconds: number;
   lastError: string | null;
+  lastUrl: string | null;
   lastOkAt: string | null;
   lastRefreshAt: string | null;
   streak429: number;
@@ -231,11 +232,17 @@ export async function clearYahooCooldown() {
   );
 }
 
-export async function refreshPrices(opts: { force?: boolean } = {}) {
+export async function refreshPrices(
+  opts: { force?: boolean; includeHistory?: boolean } = {},
+) {
   const res = await fetch(`${BASE}/api/prices/refresh`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ force: opts.force === true }),
+    body: JSON.stringify({
+      force: opts.force === true,
+      // Performance chart needs price_cache daily bars (not quotes alone).
+      includeHistory: opts.includeHistory !== false,
+    }),
   });
   const data = (await res.json().catch(() => ({}))) as {
     refreshed?: number;
@@ -247,6 +254,13 @@ export async function refreshPrices(opts: { force?: boolean } = {}) {
     }>;
     yahoo?: YahooStatus;
     yahooCircuitOpen?: boolean;
+    mode?: string;
+    includeHistory?: boolean;
+    yahooBrowserUrls?: {
+      spark: string | null;
+      chart: string | null;
+      quote: string | null;
+    };
     note?: string;
     error?: string;
   };
@@ -263,8 +277,33 @@ export async function refreshPrices(opts: { force?: boolean } = {}) {
     results: data.results ?? [],
     yahoo: data.yahoo,
     yahooCircuitOpen: data.yahooCircuitOpen,
+    mode: data.mode,
+    includeHistory: data.includeHistory,
+    yahooBrowserUrls: data.yahooBrowserUrls,
     note: data.note,
   };
+}
+
+/** Paste Yahoo chart/spark/quote JSON from a browser tab into price_cache. */
+export async function importYahooPayload(
+  payload: unknown,
+  symbol?: string,
+) {
+  return json<{
+    ok: boolean;
+    kind: string;
+    symbols: string[];
+    barsWritten: number;
+    quotesWritten: number;
+    note?: string;
+    error?: string;
+  }>(
+    await fetch(`${BASE}/api/prices/import-yahoo`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ payload, symbol }),
+    }),
+  );
 }
 
 // ─── Phase 2: DRP flags / check ─────────────────────────────────────────────

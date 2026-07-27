@@ -3,7 +3,23 @@ import {
   holdingPriceKey,
   toAud,
 } from "./market.js";
+import {
+  type SplitEvent,
+  valuationQuantity,
+} from "./splits.js";
 import type { Holding, ParsedTransaction } from "./types.js";
+
+/**
+ * Market quotes are always in the exchange's quote currency (US→USD, ASX→AUD).
+ * Ledger `currency` may be AUD for Sharesight "stored cost in AUD" — use that
+ * for cost only; never treat a USD Yahoo close as AUD.
+ */
+function quoteCurrencyForHolding(exchange: string, ledgerCurrency: string): string {
+  const fromEx = defaultCurrencyForExchange(exchange);
+  // Trust exchange default when it is a major market; ledger currency only if exchange unknown
+  if (fromEx) return fromEx;
+  return (ledgerCurrency || "AUD").toUpperCase();
+}
 
 export type HoldingsPriceMaps = {
   /** Key: "EXCHANGE:TICKER" or yahoo symbol — last price in native currency */
@@ -13,6 +29,17 @@ export type HoldingsPriceMaps = {
    * Also accept currency code keys if pre-normalised.
    */
   fxRates?: Record<string, number | null | undefined>;
+  /**
+   * Valuation date (yyyy-mm-dd). When set with splitEvents, market value uses
+   * rawQty × product of split ratios with date > valuationAsOf (Yahoo adj scale).
+   * Cost / displayed quantity stay on ledger scale.
+   */
+  valuationAsOf?: string;
+  /**
+   * Split events from the full ledger (including splits after valuationAsOf).
+   * Required for correct historical MTM against split-adjusted prices.
+   */
+  splitEvents?: SplitEvent[];
 };
 
 /**
@@ -113,25 +140,36 @@ export function computeHoldings(
       maps.prices[`${h.ticker}.AX`] ??
       null;
     const avgCost = h.quantity > 0 ? h.costBase / h.quantity : 0;
+    // Displayed qty = ledger; pricing qty back-applies future splits for adj prices
+    const priceQty = valuationQuantity(
+      h.quantity,
+      maps.valuationAsOf,
+      key,
+      maps.splitEvents,
+    );
     const marketValue =
-      marketPrice != null ? marketPrice * h.quantity : null;
+      marketPrice != null ? marketPrice * priceQty : null;
+
+    const quoteCcy = quoteCurrencyForHolding(h.exchange, h.currency);
+    const costCcy = (h.currency || quoteCcy).toUpperCase();
 
     let fxRate: number | null = null;
-    if (h.currency !== "AUD") {
+    if (quoteCcy !== "AUD") {
       const pair =
-        h.currency === "USD"
+        quoteCcy === "USD"
           ? "AUDUSD=X"
-          : h.currency === "GBP"
+          : quoteCcy === "GBP"
             ? "AUDGBP=X"
-            : h.currency === "EUR"
+            : quoteCcy === "EUR"
               ? "AUDEUR=X"
-              : `AUD${h.currency}=X`;
-      fxRate = fx[pair] ?? fx[h.currency] ?? null;
+              : `AUD${quoteCcy}=X`;
+      fxRate = fx[pair] ?? fx[quoteCcy] ?? null;
     }
 
-    const costBaseAud = toAud(h.costBase, h.currency, fx);
+    // Cost: ledger currency (often AUD from Sharesight). Value: quote currency.
+    const costBaseAud = toAud(h.costBase, costCcy, fx);
     const marketValueAud =
-      marketValue != null ? toAud(marketValue, h.currency, fx) : null;
+      marketValue != null ? toAud(marketValue, quoteCcy, fx) : null;
 
     holdings.push({
       ticker: h.ticker,
