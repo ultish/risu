@@ -76,7 +76,10 @@ export function dividendRowAmount(t: {
  * Includes:
  * - all `dividend_cash` rows
  * - `drp` rows that are **not** duplicates of a nearby cash dividend
- *   (same ticker + exchange, within ±7 days, amounts roughly equal).
+ *   (same ticker + exchange, within ±7 days, amounts roughly equal), and
+ *   **not** already explained by that instrument's own earlier cash
+ *   dividends (see "Pooled DRP" below) — only the unexplained remainder,
+ *   if any, is counted.
  *
  * Rationale: AU tax — a dividend is assessable even when reinvested via DRP.
  * Cost base of DRP lots is separate; this rollup is income only.
@@ -85,6 +88,25 @@ export function dividendRowAmount(t: {
  * only cash is counted. When only DRP is imported (Sharesight All Trades style),
  * the DRP amount is treated as assessable. Partial DRP (cash + reinvest, different
  * amounts) counts both.
+ *
+ * **Pooled DRP** (docs/import-layouts-plan.md §19): some issuer DRP plans
+ * (e.g. Computershare-administered ETFs) only buy whole units, carrying any
+ * leftover as a residual cash balance that rolls into the *next* period(s)
+ * until enough accumulates. The resulting `drp` row's amount is the
+ * reinvested unit's cost — often the sum of *several* periods' own
+ * distributions, each of which already has its own `dividend_cash` row
+ * (assessable income was recorded for every period, not just the ones that
+ * happened to buy a whole unit). Counting the `drp` amount on top would
+ * double-count that pooled income. When an instrument has genuine
+ * multi-period evidence (2+ `dividend_cash` rows — a single nearby row that
+ * already failed the exact-match check above is a *different*, unexplained
+ * distribution, not a pool), a `drp` row draws down a running per-instrument
+ * pool built from that instrument's own `dividend_cash` history dated on or
+ * before it (chronological — a distribution can't fund a purchase made
+ * before it was paid); only the shortfall beyond what the pool can explain
+ * is counted as additional income. A single nearby cash/DRP pair (fewer than
+ * 2 cash rows for that instrument) still falls through to "count both in
+ * full" as before, since there's no multi-period evidence to pool from.
  *
  * Pass Yahoo-style FX map (e.g. `{ "AUDUSD=X": 0.65 }`) to convert foreign cash to AUD.
  */
@@ -97,7 +119,7 @@ export function summarizeDividendIncome(
 
   const notes: string[] = [
     "Includes cash dividends and DRP/reinvest amounts (assessable even when reinvested).",
-    "DRP rows near an equal cash dividend for the same instrument are skipped to avoid double-count.",
+    "DRP rows matching a nearby cash dividend, or explained by that instrument's own earlier cash dividends (pooled DRP residual), are skipped or reduced to avoid double-count.",
   ];
 
   type Event = {
@@ -111,35 +133,82 @@ export function summarizeDividendIncome(
 
   const events: Event[] = [];
 
-  for (const t of cashRows) {
-    const amount = dividendRowAmount(t);
-    if (!amount) continue;
-    events.push({
-      date: t.date,
-      ticker: (t.ticker || "").toUpperCase(),
-      exchange: (t.exchange || "ASX").toUpperCase(),
-      currency: (t.currency || "AUD").toUpperCase(),
-      amount,
-      source: "cash",
-    });
-  }
+  // Per-instrument cash-dividend history (date-sorted), used below to pool
+  // multi-period DRP residuals.
+  type CashEntry = { date: string; amount: number };
+  const cashByInstrument = new Map<string, CashEntry[]>();
 
-  for (const t of drpRows) {
+  for (const t of cashRows) {
     const amount = dividendRowAmount(t);
     if (!amount) continue;
     const ticker = (t.ticker || "").toUpperCase();
     const exchange = (t.exchange || "ASX").toUpperCase();
-    if (hasMatchingCashDividend(cashRows, ticker, exchange, t.date, amount)) {
-      continue;
-    }
     events.push({
       date: t.date,
       ticker,
       exchange,
       currency: (t.currency || "AUD").toUpperCase(),
       amount,
-      source: "drp",
+      source: "cash",
     });
+    const key = `${ticker}|${exchange}`;
+    const list = cashByInstrument.get(key) ?? [];
+    list.push({ date: t.date, amount });
+    cashByInstrument.set(key, list);
+  }
+  for (const list of cashByInstrument.values()) {
+    list.sort((a, b) => a.date.localeCompare(b.date));
+  }
+
+  // Cumulative $ already drawn from each instrument's pool by an earlier
+  // (chronologically prior) DRP row, so a later DRP can't redraw the same
+  // pooled dividends.
+  const poolConsumed = new Map<string, number>();
+  const sortedDrpRows = [...drpRows].sort((a, b) =>
+    a.date.localeCompare(b.date),
+  );
+
+  for (const t of sortedDrpRows) {
+    const amount = dividendRowAmount(t);
+    if (!amount) continue;
+    const ticker = (t.ticker || "").toUpperCase();
+    const exchange = (t.exchange || "ASX").toUpperCase();
+    const currency = (t.currency || "AUD").toUpperCase();
+
+    // Primary: an obviously-matching same-event cash dividend nearby (full
+    // or partial reinvest of ONE distribution) — unchanged from before.
+    if (hasMatchingCashDividend(cashRows, ticker, exchange, t.date, amount)) {
+      continue;
+    }
+
+    const key = `${ticker}|${exchange}`;
+    const cashHistory = cashByInstrument.get(key) ?? [];
+
+    if (cashHistory.length >= 2) {
+      const availableAsOfDate = cashHistory
+        .filter((c) => c.date <= t.date)
+        .reduce((sum, c) => sum + c.amount, 0);
+      const alreadyConsumed = poolConsumed.get(key) ?? 0;
+      const pool = Math.max(0, availableAsOfDate - alreadyConsumed);
+      const draw = Math.min(pool, amount);
+      poolConsumed.set(key, alreadyConsumed + draw);
+
+      const shortfall = amount - draw;
+      if (shortfall <= 0) continue; // fully explained by prior distributions
+      events.push({
+        date: t.date,
+        ticker,
+        exchange,
+        currency,
+        amount: shortfall,
+        source: "drp",
+      });
+      continue;
+    }
+
+    // Fallback: no pooling evidence — count in full (matches prior
+    // behaviour for DRP-only imports with no cash-dividend data at all).
+    events.push({ date: t.date, ticker, exchange, currency, amount, source: "drp" });
   }
 
   const bucket = new Map<string, IncomeLine>();
