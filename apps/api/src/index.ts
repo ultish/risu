@@ -41,6 +41,7 @@ import path from "node:path";
 import { getDbPath, openDb } from "./db.js";
 import { registerExportRoutes } from "./routes/export.js";
 import { registerPerformanceRoutes } from "./routes/performance.js";
+import { registerReconcileRoutes } from "./routes/reconcile.js";
 import {
   assertYahooAllowed,
   clearYahooCooldown,
@@ -265,6 +266,7 @@ function priceMapsFromCache(): {
 
 registerPerformanceRoutes(app, { db, loadTransactions });
 registerExportRoutes(app, { db, dbPath: getDbPath() });
+registerReconcileRoutes(app, { db });
 
 // ─── Transactions ───────────────────────────────────────────────────────────
 

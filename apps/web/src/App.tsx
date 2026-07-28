@@ -4,6 +4,7 @@ import {
   type Holding,
   type ImportResult,
   type Portfolio,
+  type ReconcileResult,
   type TxRow,
   type YahooStatus,
   clearYahooCooldown,
@@ -17,6 +18,7 @@ import {
   fetchYahooStatus,
   importFile,
   importSharesightPaste,
+  reconcileFile,
   refreshPrices,
 } from "./api";
 import { Disclaimer } from "./Disclaimer";
@@ -134,6 +136,9 @@ type FileQueueItem = {
   status: FileItemStatus;
   result: ImportResult | null;
   error: string | null;
+  reconcile: ReconcileResult | null;
+  reconciling: boolean;
+  reconcileError: string | null;
 };
 
 function fileQueueKey(file: File) {
@@ -158,6 +163,22 @@ function classifyItem(
     return "needs_custody";
   }
   return "ready";
+}
+
+/**
+ * Lightweight client-side heuristic (no network call) for whether a queued
+ * file is plausibly a Stake Investment Activity XLSX worth offering a
+ * "Reconcile with ledger" button for (Phase 5, docs/import-layouts-plan.md
+ * §12). Server does the real detection; this only gates the button.
+ */
+function looksLikeStakeActivityXlsx(
+  file: File,
+  parserOverride: string | null,
+  globalParser: string,
+): boolean {
+  if (!/\.xlsx$/i.test(file.name)) return false;
+  const effectiveParser = parserOverride ?? globalParser;
+  return effectiveParser === "auto" || effectiveParser === "stake";
 }
 
 const BROKERS = [
@@ -483,6 +504,9 @@ export default function App() {
           status: classifyItem(f, null, importBroker, parser),
           result: null,
           error: null,
+          reconcile: null,
+          reconciling: false,
+          reconcileError: null,
         });
       }
       return next;
@@ -592,6 +616,44 @@ export default function App() {
     }
     await load();
     setBusy(false);
+  }
+
+  /** Phase 5: read-only diff of a Stake activity XLSX vs the ledger — never writes. */
+  async function onReconcile(key: string) {
+    const item = files.find((i) => i.key === key);
+    if (!item) return;
+    if (portfolioId === "all") {
+      setError("Select a portfolio to reconcile against");
+      return;
+    }
+    setFiles((prev) =>
+      prev.map((i) =>
+        i.key === key
+          ? { ...i, reconciling: true, reconcileError: null }
+          : i,
+      ),
+    );
+    try {
+      const reconcile = await reconcileFile({
+        file: item.file,
+        portfolioId,
+        custody: item.custodyOverride || undefined,
+      });
+      setFiles((prev) =>
+        prev.map((i) =>
+          i.key === key ? { ...i, reconciling: false, reconcile } : i,
+        ),
+      );
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setFiles((prev) =>
+        prev.map((i) =>
+          i.key === key
+            ? { ...i, reconciling: false, reconcileError: message }
+            : i,
+        ),
+      );
+    }
   }
 
   async function onRefreshPrices() {
@@ -1339,6 +1401,25 @@ export default function App() {
                         ))}
                       </select>
                       <FileStatusBadge item={item} />
+                      {looksLikeStakeActivityXlsx(
+                        item.file,
+                        item.parserOverride,
+                        parser,
+                      ) && (
+                        <button
+                          type="button"
+                          onClick={() => void onReconcile(item.key)}
+                          disabled={
+                            item.reconciling ||
+                            item.status === "importing" ||
+                            portfolioId === "all"
+                          }
+                          title="Read-only diff vs the ledger — does not import anything"
+                          className="rounded-md border border-gray-700 px-2 py-1 text-xs text-gray-300 hover:bg-gray-800 hover:text-emerald-200 disabled:opacity-40"
+                        >
+                          {item.reconciling ? "Reconciling…" : "Reconcile with ledger"}
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => removeFile(item.key)}
@@ -1361,6 +1442,25 @@ export default function App() {
                             {item.result.warnings[0]?.message}
                           </p>
                         )}
+                      {item.reconcileError && (
+                        <p className="w-full text-xs text-red-300">
+                          Reconcile failed: {item.reconcileError}
+                        </p>
+                      )}
+                      {item.reconcile && (
+                        <ReconcileReport
+                          result={item.reconcile}
+                          onClear={() =>
+                            setFiles((prev) =>
+                              prev.map((i) =>
+                                i.key === item.key
+                                  ? { ...i, reconcile: null }
+                                  : i,
+                              ),
+                            )
+                          }
+                        />
+                      )}
                     </div>
                   ))}
                 </div>
@@ -2015,6 +2115,175 @@ function ImportBatchSummary({ files }: { files: FileQueueItem[] }) {
           {unsupported.length === 1 ? "" : "s"} skipped
         </p>
       )}
+    </div>
+  );
+}
+
+/**
+ * Phase 5 reconcile report (docs/import-layouts-plan.md §12). Read-only —
+ * shows counts + the actual mismatched/unmatched rows so the operator can
+ * decide what (if anything) to import or fix by hand. No import action here
+ * in v1 per the plan's "don't overbuild" guidance — Transactions tab already
+ * covers editing/importing.
+ */
+function ReconcileReport({
+  result,
+  onClear,
+}: {
+  result: ReconcileResult;
+  onClear: () => void;
+}) {
+  return (
+    <div className="mt-2 w-full rounded-lg border border-gray-800 bg-gray-900/60 p-3 text-xs">
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="rounded-md bg-emerald-500/15 px-2 py-0.5 font-medium text-emerald-300">
+            {result.matched} matched
+          </span>
+          <span className="rounded-md bg-gray-700/40 px-2 py-0.5 text-gray-300">
+            {result.fileOnly.length} file-only
+          </span>
+          <span className="rounded-md bg-gray-700/40 px-2 py-0.5 text-gray-300">
+            {result.ledgerOnly.length} ledger-only
+          </span>
+          <span
+            className={`rounded-md px-2 py-0.5 ${
+              result.conflicts.length
+                ? "bg-red-500/15 text-red-300"
+                : "bg-gray-700/40 text-gray-300"
+            }`}
+          >
+            {result.conflicts.length} conflict
+            {result.conflicts.length === 1 ? "" : "s"}
+          </span>
+          {result.period && (
+            <span className="text-gray-500">
+              Statement {result.period.from} → {result.period.to}
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onClear}
+          className="rounded-md px-2 py-0.5 text-gray-500 hover:bg-gray-800 hover:text-gray-300"
+        >
+          Dismiss
+        </button>
+      </div>
+
+      {result.conflicts.length > 0 && (
+        <ReconcileTable title="Conflicts (matched, but a field differs)">
+          <table className="w-full text-left">
+            <thead className="text-gray-500">
+              <tr>
+                <th className="py-1 pr-2">Date</th>
+                <th className="py-1 pr-2">Ticker</th>
+                <th className="py-1 pr-2">Field(s)</th>
+                <th className="py-1 pr-2">File</th>
+                <th className="py-1 pr-2">Ledger</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.conflicts.map((c, i) => (
+                <tr key={i} className="border-t border-gray-800/80">
+                  <td className="py-1 pr-2 text-gray-300">{c.file.date}</td>
+                  <td className="py-1 pr-2 text-gray-300">{c.file.ticker}</td>
+                  <td className="py-1 pr-2 text-amber-300">
+                    {c.fields.join(", ")}
+                  </td>
+                  <td className="py-1 pr-2 text-gray-400">
+                    {c.file.type} · qty {c.file.quantity} · price{" "}
+                    {c.file.price ?? "—"}
+                  </td>
+                  <td className="py-1 pr-2 text-gray-400">
+                    {c.ledger.type} · qty {c.ledger.quantity} · price{" "}
+                    {c.ledger.price ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </ReconcileTable>
+      )}
+
+      {result.fileOnly.length > 0 && (
+        <ReconcileTable title="File-only (in the XLSX, not found in the ledger)">
+          <table className="w-full text-left">
+            <thead className="text-gray-500">
+              <tr>
+                <th className="py-1 pr-2">Date</th>
+                <th className="py-1 pr-2">Ticker</th>
+                <th className="py-1 pr-2">Type</th>
+                <th className="py-1 pr-2">Qty</th>
+                <th className="py-1 pr-2">Price</th>
+                <th className="py-1 pr-2">External ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.fileOnly.map((t, i) => (
+                <tr key={i} className="border-t border-gray-800/80">
+                  <td className="py-1 pr-2 text-gray-300">{t.date}</td>
+                  <td className="py-1 pr-2 text-gray-300">{t.ticker}</td>
+                  <td className="py-1 pr-2 text-gray-400">{t.type}</td>
+                  <td className="py-1 pr-2 text-gray-400">{t.quantity}</td>
+                  <td className="py-1 pr-2 text-gray-400">{t.price ?? "—"}</td>
+                  <td className="py-1 pr-2 text-gray-500">
+                    {t.externalId ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </ReconcileTable>
+      )}
+
+      {result.ledgerOnly.length > 0 && (
+        <ReconcileTable title="Ledger-only (in the ledger within the statement period, not in the file)">
+          <table className="w-full text-left">
+            <thead className="text-gray-500">
+              <tr>
+                <th className="py-1 pr-2">Date</th>
+                <th className="py-1 pr-2">Ticker</th>
+                <th className="py-1 pr-2">Type</th>
+                <th className="py-1 pr-2">Qty</th>
+                <th className="py-1 pr-2">Price</th>
+                <th className="py-1 pr-2">External ID</th>
+              </tr>
+            </thead>
+            <tbody>
+              {result.ledgerOnly.map((l) => (
+                <tr key={l.id} className="border-t border-gray-800/80">
+                  <td className="py-1 pr-2 text-gray-300">{l.date}</td>
+                  <td className="py-1 pr-2 text-gray-300">{l.ticker}</td>
+                  <td className="py-1 pr-2 text-gray-400">{l.type}</td>
+                  <td className="py-1 pr-2 text-gray-400">{l.quantity}</td>
+                  <td className="py-1 pr-2 text-gray-400">{l.price ?? "—"}</td>
+                  <td className="py-1 pr-2 text-gray-500">
+                    {l.external_id ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </ReconcileTable>
+      )}
+    </div>
+  );
+}
+
+function ReconcileTable({
+  title,
+  children,
+}: {
+  title: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="mb-3 last:mb-0">
+      <p className="mb-1 text-gray-500">{title}</p>
+      <div className="max-h-48 overflow-auto rounded-md border border-gray-800/80">
+        {children}
+      </div>
     </div>
   );
 }

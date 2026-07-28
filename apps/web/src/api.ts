@@ -69,6 +69,47 @@ export type ImportResult = {
   confidence?: "high" | "low" | "none" | null;
 };
 
+/** A parsed row as returned inline on reconcile (subset of ParsedTransaction fields we render). */
+export type ReconcileParsedTx = {
+  date: string;
+  ticker: string;
+  exchange: string;
+  type: string;
+  quantity: number;
+  price: number | null;
+  amount: number | null;
+  brokerage: number;
+  currency: string;
+  externalId: string | null;
+  notes: string | null;
+};
+
+export type ReconcileLedgerRow = {
+  id: number;
+  date: string;
+  ticker: string;
+  type: string;
+  quantity: number;
+  price: number | null;
+  external_id: string | null;
+};
+
+export type ReconcileConflict = {
+  fields: string[];
+  file: ReconcileParsedTx;
+  ledger: ReconcileLedgerRow;
+};
+
+export type ReconcileResult = {
+  layoutId: string;
+  period: { from: string; to: string } | null;
+  matched: number;
+  fileOnly: ReconcileParsedTx[];
+  ledgerOnly: ReconcileLedgerRow[];
+  conflicts: ReconcileConflict[];
+  warnings?: Array<{ row?: number; message: string; severity?: string }>;
+};
+
 export type Filters = {
   portfolioId?: number;
   broker?: string;
@@ -180,6 +221,23 @@ export async function importFile(opts: {
   if (opts.source) fd.append("source", opts.source);
   return json<ImportResult>(
     await fetch(`${BASE}/api/import`, { method: "POST", body: fd }),
+  );
+}
+
+/** Read-only diff of a Stake Investment Activity XLSX vs ledger rows — no writes. */
+export async function reconcileFile(opts: {
+  file: File;
+  portfolioId: number;
+  ticker?: string;
+  custody?: string;
+}) {
+  const fd = new FormData();
+  fd.append("file", opts.file);
+  fd.append("portfolioId", String(opts.portfolioId));
+  if (opts.ticker) fd.append("ticker", opts.ticker);
+  if (opts.custody) fd.append("custody", opts.custody);
+  return json<ReconcileResult>(
+    await fetch(`${BASE}/api/import/reconcile`, { method: "POST", body: fd }),
   );
 }
 

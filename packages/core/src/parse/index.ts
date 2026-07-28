@@ -33,8 +33,10 @@ export {
 } from "./layouts.js";
 export {
   detectStakeWorkbookKind,
+  getStakeStatementPeriod,
   parseStakeActivityWorkbook,
   parseStakeIncomeWorkbook,
+  readWorkbook,
 } from "./stakeWorkbook.js";
 
 export type ParseFileInput = {
