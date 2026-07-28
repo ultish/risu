@@ -8,9 +8,10 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 ## [Unreleased]
 
 ### Planned
-- **Multi-layout import** phases 3–5 — [docs/import-layouts-plan.md](./docs/import-layouts-plan.md) (PDF layouts, XLSX↔ledger reconcile). Phases 0–2 done (see Added).
+- **Multi-layout import** phases 3–4 — [docs/import-layouts-plan.md](./docs/import-layouts-plan.md) (PDF layouts: Computershare, Link/MUFG, Betashares Direct). Phases 0–2 + 5 done (see Added).
 
 ### Added
+- **Reconcile Stake XLSX ↔ ledger (phase 5, read-only):** `POST /api/import/reconcile` diffs a Stake Investment Activity XLSX against existing ledger rows for a portfolio — **no writes, ever**. Matches by `externalId` first, then `(date, ticker, type)` + qty/price tolerance (`ε_qty=1e-6`, `ε_price=0.015`); categorises `matched` / `fileOnly` / `ledgerOnly` (within the statement period only) / `conflicts` (which fields differ). Pure matcher lives in core as `reconcileStakeActivity` (`packages/core/src/reconcile.ts`), unit-tested against synthetic fixtures. Import tab shows a **"Reconcile with ledger"** button per queued Stake XLSX file with a small report (counts + the actual mismatched/unmatched rows).
 - **Multi-file import UI (phase 2):** drag-drop + multi-select file queue in Import → Import file; per-file parser/custody override and status (ready / needs custody / unsupported / error); "Auto-detect" is now the default parser; partial-batch failures are isolated (one bad file doesn't block the rest); import response now echoes `layoutId`/`confidence`.
 - **Import foundations (phase 0):** `LayoutId` / detect types; `broker: "auto"`; PDF uploads return a clear “not implemented — use Stake XLSX” error (no crash); `parseImportFile` alias; fixture dirs `fixtures/xlsx/stake`, `fixtures/pdf`
 - **Stake Tax & Documents multi-sheet XLSX**: Investment **Activity** merges Aus + Wall St equity sheets; Investment **Income** → `dividend_cash` (estimated). Detect via Summary “Report Type”. Trade Identifier → `externalId`; `Avg. Price` / `.ASX` ticker fixes. Empty FYs return 0 trades (info), not a hard error.

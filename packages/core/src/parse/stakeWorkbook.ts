@@ -82,6 +82,23 @@ export function detectStakeWorkbookKind(
   return null;
 }
 
+/**
+ * Statement period from the Summary sheet's "Statement Date: YYYY-MM-DD -
+ * YYYY-MM-DD" line (Phase 5 reconcile §12). Returns null when the Summary
+ * sheet doesn't have that line — callers should fall back to min/max of the
+ * parsed transaction dates.
+ */
+export function getStakeStatementPeriod(
+  workbook: XLSX.WorkBook,
+): { from: string; to: string } | null {
+  const summaryText = sheetToPlainText(workbook, "Summary");
+  const m = summaryText.match(
+    /statement\s*date\s*:\s*(\d{4}-\d{2}-\d{2})\s*-\s*(\d{4}-\d{2}-\d{2})/i,
+  );
+  if (!m) return null;
+  return { from: m[1]!, to: m[2]! };
+}
+
 function annotateMarket(
   rows: Record<string, unknown>[],
   market: string,
