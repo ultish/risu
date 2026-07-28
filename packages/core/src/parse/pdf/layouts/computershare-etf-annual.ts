@@ -55,6 +55,74 @@ import type { LayoutParser, LayoutScoreInput } from "../types.js";
  * robust than the literal regexes sketched in Appendix A.2, which the doc
  * itself flags as illustrative ("practical approach that works on these
  * PDFs").
+ *
+ * Phase 6 (docs/import-layouts-plan.md §19): Computershare statements have
+ * **no** labelled "Distribution Details" section the way Link/MUFG's do —
+ * confirmed against the full real jimmy corpus (grepped every VGS/IOZ year
+ * for "Distribution": nothing but the Transaction List rows and this second
+ * block). iShares' own glossary text says as much: "For further details of
+ * the specific dollar amount and dates of each distribution amount paid,
+ * please see your Distribution Payment Statement... this information is not
+ * provided to Computershare/Vanguard/iShares in this document." What *is*
+ * present, right after the Transaction List (bounded by the same
+ * `Cash Distribution Received` / `Distribution Reinvestment Cash Balance`
+ * text used below as `END_MARKERS`), is a second parallel-column block:
+ *
+ *   Cash Distribution Received-        <- glued: "-" (no cash paid out, all
+ *                                          reinvested) or "$15.00" (glossary:
+ *                                          "Any payments received in cash for
+ *                                          distributions... paid to your
+ *                                          nominated bank account" — a whole-
+ *                                          statement total, not per-period)
+ *   Distribution Reinvestment Cash Balance
+ *   Date
+ *   1
+ *   Balance
+ *   30/06/2023                         <- same dates as the Transaction List,
+ *   18/07/2023                            MINUS any Purchase/Sale dates (a
+ *   17/10/2023                            Purchase doesn't touch the DRP
+ *   17/01/2024                            residual cash account) — verified
+ *   17/04/2024                            against the real IOZ-2024 file,
+ *   30/06/2024                            which has a Purchase row that is
+ *   $45.98                                absent from this date list.
+ *   $81.71
+ *   $103.21
+ *   $11.02
+ *   $44.12
+ *   $44.12
+ *
+ * This "Balance" is the running *unspent residual* left over after each
+ * period's distribution reinvested what whole units it could (glossary:
+ * "Any money left over after purchasing DRP units is held in a cash balance
+ * account. This amount will be added to your next distribution and put
+ * towards the purchase of new ETF units."). That means the period's actual
+ * gross distribution is recoverable arithmetically — the same
+ * arithmetic-consistency trick Phase 4 used for the Link/MUFG glued
+ * units/balance split:
+ *
+ *   grossDistribution[i] = (balance[i] - balance[i-1]) + delta_units[i] * price[i]
+ *
+ * (the residual account gained this period's distribution, then spent
+ * `delta*price` buying whole units — whatever's left is `balance[i]`).
+ * Verified end-to-end against the real jimmy corpus: for every
+ * Distribution Reinvested row (0-unit and whole-unit alike) across all 7 VGS
+ * years and both IOZ years, `balance[i-1] + grossDistribution[i] - delta*price
+ * === balance[i]` exactly, and — for the one file with a nonzero opening
+ * balance of $0 (VGS-2020, no prior-year carryover) — the four periods' sum
+ * lands exactly on the closing balance, an independent cross-check of the
+ * formula.
+ *
+ * Caveat, found in VGS-2019 only (nonzero `Cash Distribution Received$15.00`):
+ * when part of the distribution was paid to the bank account instead of the
+ * DRP residual account, that portion isn't attributable to a single period
+ * from this document alone (it's a whole-statement total). We warn instead
+ * of guessing which period(s) it belongs to (docs §15.3 "warn > silent
+ * drop") — see `parseDistributionReinvestmentBalances`.
+ *
+ * No per-unit distribution *rate* is ever disclosed in this document family
+ * (unlike Link/MUFG's explicit "Distribution Rate" column) — the Transaction
+ * List's "Unit Price" is the DRP reinvestment/NAV price, not a distribution
+ * rate — so `dividend_cash` rows here always carry `price: null`.
  */
 
 const HEADER_ANCHOR_RE = /Unit TransactionsUnit Price/i;
@@ -63,6 +131,91 @@ const END_MARKERS = [
   /Distribution Reinvestment Cash Balance/i,
   /Fees and Costs/i,
 ];
+
+// Phase 6: where the "Distribution Reinvestment Cash Balance" block ends —
+// searched *after* the block start, so these never match anything earlier in
+// the letter/glossary preamble.
+const DIST_BALANCE_END_MARKERS = [
+  /Return on Investment/i,
+  /Fees and Costs Summary/i,
+  /^Broadcast\d/im,
+];
+const CASH_DIST_RECEIVED_RE = /^Cash Distribution Received(-|\$[\d,]+\.\d{2})$/;
+
+function findDistBalanceEnd(text: string, from: number): number {
+  let end = text.length;
+  for (const marker of DIST_BALANCE_END_MARKERS) {
+    const m = marker.exec(text.slice(from));
+    if (m) {
+      const idx = from + m.index;
+      if (idx < end) end = idx;
+    }
+  }
+  return end;
+}
+
+type DistBalanceResult =
+  | { balanceByIso: Map<string, number>; cashReceivedTotal: number }
+  | { error: string };
+
+/**
+ * Parse the "Distribution Reinvestment Cash Balance" block (Phase 6) into a
+ * date → residual-balance map, plus the whole-statement
+ * "Cash Distribution Received" total (see module doc comment above). `from`
+ * should be the index of the `Cash Distribution Received` line (i.e.
+ * `sectionEnd` from the Transaction List parse, which already anchors there).
+ */
+function parseDistributionReinvestmentBalances(
+  text: string,
+  from: number,
+): DistBalanceResult {
+  const to = findDistBalanceEnd(text, from);
+  const lines = text
+    .slice(from, to)
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+
+  const cashMatch = lines[0] ? CASH_DIST_RECEIVED_RE.exec(lines[0]) : null;
+  if (!cashMatch) {
+    return {
+      error: `expected a "Cash Distribution Received" line, got "${lines[0] ?? "(nothing)"}"`,
+    };
+  }
+  const cashReceivedTotal = cashMatch[1] === "-" ? 0 : (num(cashMatch[1]!) ?? 0);
+
+  let i = 1;
+  // Skip "Distribution Reinvestment Cash Balance" / "Date" / footnote digit /
+  // "Balance" label noise — anything up to the first date line.
+  while (i < lines.length && !DATE_RE.test(lines[i]!)) i++;
+
+  const dates: string[] = [];
+  while (i < lines.length && DATE_RE.test(lines[i]!)) {
+    dates.push(lines[i]!);
+    i++;
+  }
+
+  const values: string[] = [];
+  for (let k = 0; k < dates.length && i < lines.length; k++, i++) {
+    if (!PRICE_TOKEN_RE.test(lines[i]!)) break;
+    values.push(lines[i]!);
+  }
+
+  if (dates.length === 0 || values.length !== dates.length) {
+    return {
+      error: `could not read the balance table cleanly (${dates.length} date(s), ${values.length} balance value(s))`,
+    };
+  }
+
+  const balanceByIso = new Map<string, number>();
+  for (let k = 0; k < dates.length; k++) {
+    const iso = parseDate(dates[k]!);
+    if (!iso) continue;
+    balanceByIso.set(iso, num(values[k]!) ?? 0);
+  }
+
+  return { balanceByIso, cashReceivedTotal };
+}
 
 const DATE_RE = /^\d{2}\/\d{2}\/\d{4}$/;
 const DESC_RE =
@@ -73,6 +226,10 @@ const UNITS_TOKEN_RE = /^-$|^\d+(?:\.\d+)?$/;
 function num(raw: string): number | null {
   if (raw === "-") return null;
   return parseNumber(raw);
+}
+
+function round2(n: number): number {
+  return Math.round(n * 100) / 100;
 }
 
 function findSectionEnd(text: string, from: number): number {
@@ -182,6 +339,29 @@ export function parseComputershareEtfAnnualText(
 
   const unitsHeldNum = unitsHeld.map(num);
 
+  // Phase 6: derive gross per-period distributions from the
+  // "Distribution Reinvestment Cash Balance" block that follows the
+  // Transaction List (see module doc comment). `sectionEnd` already anchors
+  // at the "Cash Distribution Received" line (it's the closest END_MARKERS
+  // hit), so reuse it as the start of this second block.
+  const distResult = parseDistributionReinvestmentBalances(text, sectionEnd);
+  let balanceByIso: Map<string, number> | null = null;
+  if ("error" in distResult) {
+    warnings.push({
+      message: `Computershare: could not parse the Distribution Reinvestment Cash Balance table (${distResult.error}) — dividend_cash rows not recovered for this statement (drp rows, if any, are unaffected)`,
+      severity: "warn",
+    });
+  } else {
+    balanceByIso = distResult.balanceByIso;
+    if (distResult.cashReceivedTotal > 0) {
+      warnings.push({
+        message: `Computershare: $${distResult.cashReceivedTotal.toFixed(2)} in "Cash Distribution Received" (paid directly to the bank account, not reinvested) for this statement could not be attributed to a specific distribution date — dividend_cash rows below may understate total distributions for the year by this amount`,
+        severity: "warn",
+      });
+    }
+  }
+  let prevBalanceCash: number | null = null;
+
   for (let idx = 0; idx < n; idx++) {
     const desc = descriptions[idx]!;
     const iso = parseDate(dates[idx]!);
@@ -195,6 +375,14 @@ export function parseComputershareEtfAnnualText(
 
     if (desc === "Opening Balance" || desc === "Closing Balance") {
       // Reconcile-only — not a ledger transaction (docs Appendix A.2 step 4).
+      // Still track the residual cash balance across these rows (Phase 6) —
+      // Purchase/Sale rows below deliberately do NOT update it, since a
+      // Purchase doesn't touch the DRP residual account (verified: the real
+      // IOZ-2024 balance table skips its Purchase date entirely).
+      if (balanceByIso) {
+        const bal = balanceByIso.get(iso);
+        if (bal != null) prevBalanceCash = bal;
+      }
       continue;
     }
 
@@ -212,6 +400,50 @@ export function parseComputershareEtfAnnualText(
     const delta = curHeld - prevHeld;
 
     if (desc === "Distribution Reinvested") {
+      // Phase 6: emit the full gross distribution for this period as a
+      // dividend_cash row, ALONGSIDE (not instead of) the existing drp-only
+      // logic below — the dividend was paid whether or not it stretched to a
+      // whole reinvested unit. See module doc comment for the formula.
+      if (balanceByIso) {
+        const curBalanceCash = balanceByIso.get(iso);
+        if (curBalanceCash == null || prevBalanceCash == null) {
+          warnings.push({
+            message: `Computershare: could not determine the DRP residual cash balance around ${iso} — dividend_cash row not recovered for this period`,
+            severity: "warn",
+          });
+        } else if (price == null && delta !== 0) {
+          warnings.push({
+            message: `Computershare: Distribution Reinvested on ${iso} has an unknown unit price and a non-zero unit delta — gross distribution amount cannot be confidently computed, dividend_cash row not recovered for this period`,
+            severity: "warn",
+          });
+        } else {
+          const spent = delta !== 0 && price != null ? delta * price : 0;
+          const gross = curBalanceCash - prevBalanceCash + spent;
+          if (!Number.isFinite(gross) || gross <= 0) {
+            warnings.push({
+              message: `Computershare: computed a non-positive gross distribution ($${gross.toFixed(2)}) for ${iso} — dividend_cash row not recovered for this period, check the statement manually`,
+              severity: "warn",
+            });
+          } else {
+            transactions.push({
+              date: iso,
+              ticker,
+              exchange: "ASX",
+              type: "dividend_cash",
+              quantity: 0,
+              price: null,
+              amount: round2(gross),
+              brokerage: 0,
+              currency: "AUD",
+              externalId: `cs-${ticker.toLowerCase()}-${iso}-dividend_cash`,
+              notes:
+                "Distribution Reinvested — gross distribution for the period (derived from the Distribution Reinvestment Cash Balance table; no per-unit rate is disclosed)",
+            });
+          }
+        }
+        prevBalanceCash = curBalanceCash ?? prevBalanceCash;
+      }
+
       if (delta <= 0) {
         warnings.push({
           message: `Computershare: 0-unit Distribution Reinvested on ${iso} (DRP cash balance only, no whole units bought) — not imported as a ledger row`,
