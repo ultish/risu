@@ -65,6 +65,8 @@ export type ImportResult = {
   duplicatesSkipped: number;
   warnings: Array<{ row?: number; message: string; severity?: string }>;
   preview: Array<Record<string, unknown>>;
+  layoutId?: string | null;
+  confidence?: "high" | "low" | "none" | null;
 };
 
 export type Filters = {

@@ -105,6 +105,7 @@ type TxSortKey =
   | "amount";
 
 const PARSERS = [
+  { id: "auto", label: "Auto-detect" },
   { id: "sharesight", label: "Sharesight file" },
   { id: "commsec", label: "CommSec CSV" },
   { id: "pocket", label: "Pocket CSV" },
@@ -113,6 +114,51 @@ const PARSERS = [
   { id: "betashares_direct", label: "Betashares Direct" },
   { id: "generic", label: "Generic CSV" },
 ] as const;
+
+/** Parsers whose server-side custody inference (`inferCustodyFromParser`) always resolves to null. */
+const NO_CUSTODY_PARSERS = new Set(["sharesight", "generic"]);
+
+type FileItemStatus =
+  | "ready"
+  | "needs_custody"
+  | "unsupported"
+  | "importing"
+  | "done"
+  | "error";
+
+type FileQueueItem = {
+  key: string;
+  file: File;
+  parserOverride: string | null;
+  custodyOverride: string;
+  status: FileItemStatus;
+  result: ImportResult | null;
+  error: string | null;
+};
+
+function fileQueueKey(file: File) {
+  return `${file.name}:${file.size}:${file.lastModified}`;
+}
+
+/**
+ * Synchronous, no-network classification. `auto`-parser rows are always
+ * "ready" even though the real detected broker (only known post-parse) might
+ * resolve to null custody server-side — an intentional v1 simplification
+ * (docs/import-layouts-plan.md §10.3 "detect without extra endpoint").
+ */
+function classifyItem(
+  file: File,
+  parserOverride: string | null,
+  custodyOverride: string,
+  globalParser: string,
+): FileItemStatus {
+  if (/\.pdf$/i.test(file.name)) return "unsupported";
+  const effectiveParser = parserOverride ?? globalParser;
+  if (NO_CUSTODY_PARSERS.has(effectiveParser) && custodyOverride === "") {
+    return "needs_custody";
+  }
+  return "ready";
+}
 
 const BROKERS = [
   { id: "stake", label: "Stake" },
@@ -176,10 +222,10 @@ export default function App() {
   const [fx, setFx] = useState<Record<string, number | null>>({});
   const [txs, setTxs] = useState<TxRow[]>([]);
 
-  const [parser, setParser] = useState("commsec");
+  const [parser, setParser] = useState("auto");
   const [importBroker, setImportBroker] = useState("commsec");
-  const [file, setFile] = useState<File | null>(null);
-  const [importResult, setImportResult] = useState<ImportResult | null>(null);
+  const [files, setFiles] = useState<FileQueueItem[]>([]);
+  const [dragActive, setDragActive] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [yahooStatus, setYahooStatus] = useState<YahooStatus | null>(null);
@@ -402,6 +448,93 @@ export default function App() {
     return portfolios.find((p) => p.id === portfolioId)?.name ?? "Portfolio";
   }, [portfolioId, portfolios]);
 
+  // Re-classify queue items that inherit the global parser when it changes.
+  useEffect(() => {
+    setFiles((prev) =>
+      prev.map((item) =>
+        item.parserOverride == null
+          ? {
+              ...item,
+              status: classifyItem(
+                item.file,
+                null,
+                item.custodyOverride,
+                parser,
+              ),
+            }
+          : item,
+      ),
+    );
+  }, [parser]);
+
+  function addFiles(list: FileList | File[]) {
+    setFiles((prev) => {
+      const existingKeys = new Set(prev.map((i) => i.key));
+      const next = [...prev];
+      for (const f of Array.from(list)) {
+        const key = fileQueueKey(f);
+        if (existingKeys.has(key)) continue;
+        existingKeys.add(key);
+        next.push({
+          key,
+          file: f,
+          parserOverride: null,
+          custodyOverride: importBroker,
+          status: classifyItem(f, null, importBroker, parser),
+          result: null,
+          error: null,
+        });
+      }
+      return next;
+    });
+  }
+
+  function removeFile(key: string) {
+    setFiles((prev) => prev.filter((i) => i.key !== key));
+  }
+
+  function setItemParser(key: string, value: string) {
+    setFiles((prev) =>
+      prev.map((i) => {
+        if (i.key !== key) return i;
+        const parserOverride = value === "" ? null : value;
+        return {
+          ...i,
+          parserOverride,
+          status: classifyItem(i.file, parserOverride, i.custodyOverride, parser),
+        };
+      }),
+    );
+  }
+
+  function setItemCustody(key: string, value: string) {
+    setFiles((prev) =>
+      prev.map((i) =>
+        i.key === key
+          ? {
+              ...i,
+              custodyOverride: value,
+              status: classifyItem(i.file, i.parserOverride, value, parser),
+            }
+          : i,
+      ),
+    );
+  }
+
+  function onDrop(e: React.DragEvent) {
+    e.preventDefault();
+    setDragActive(false);
+    if (e.dataTransfer.files?.length) addFiles(e.dataTransfer.files);
+  }
+  function onDragOver(e: React.DragEvent) {
+    e.preventDefault();
+    setDragActive(true);
+  }
+  function onDragLeave(e: React.DragEvent) {
+    e.preventDefault();
+    setDragActive(false);
+  }
+
   async function onCreatePortfolio() {
     if (!newPortfolioName.trim()) return;
     setBusy(true);
@@ -417,8 +550,9 @@ export default function App() {
   }
 
   async function onImport() {
-    if (!file) {
-      setError("Choose a CSV or XLSX file");
+    const readyKeys = files.filter((f) => f.status === "ready").map((f) => f.key);
+    if (!readyKeys.length) {
+      setError("Add at least one CSV or XLSX file");
       return;
     }
     if (portfolioId === "all") {
@@ -427,22 +561,37 @@ export default function App() {
     }
     setBusy(true);
     setError(null);
-    try {
-      const result = await importFile({
-        file,
-        portfolioId,
-        parser,
-        broker: importBroker,
-      });
-      setImportResult(result);
-      setFile(null);
-      await load();
-      setTab("transactions");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+    setFiles((prev) =>
+      prev.map((i) =>
+        readyKeys.includes(i.key) ? { ...i, status: "importing" } : i,
+      ),
+    );
+    for (const key of readyKeys) {
+      const item = files.find((i) => i.key === key);
+      if (!item) continue;
+      try {
+        const result = await importFile({
+          file: item.file,
+          portfolioId,
+          parser: item.parserOverride ?? parser,
+          broker: item.custodyOverride || undefined,
+        });
+        setFiles((prev) =>
+          prev.map((i) =>
+            i.key === key ? { ...i, status: "done", result, error: null } : i,
+          ),
+        );
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        setFiles((prev) =>
+          prev.map((i) =>
+            i.key === key ? { ...i, status: "error", error: message } : i,
+          ),
+        );
+      }
     }
+    await load();
+    setBusy(false);
   }
 
   async function onRefreshPrices() {
@@ -1047,10 +1196,12 @@ export default function App() {
           {importSub === "file" && (
             <Panel title="Import broker / Sharesight file">
               <p className="mb-4 text-sm text-gray-400">
-                File goes into a{" "}
-                <strong className="text-gray-200">portfolio</strong>. Set{" "}
-                <strong className="text-gray-200">broker</strong> to custody
-                (Stake etc.). Parser only decides how to read the file.
+                Drop or choose one or more files — each imports into the
+                selected <strong className="text-gray-200">portfolio</strong>.{" "}
+                <strong className="text-gray-200">Auto-detect</strong> picks
+                the parser per file and, when left on “Auto”, custody is
+                inferred from what was detected. Override parser/custody per
+                file below if needed.
               </p>
               <div className="grid gap-4 sm:grid-cols-3">
                 <label className="block text-sm">
@@ -1071,7 +1222,9 @@ export default function App() {
                   </select>
                 </label>
                 <label className="block text-sm">
-                  <span className="mb-1 block text-gray-400">File parser</span>
+                  <span className="mb-1 block text-gray-400">
+                    Default parser
+                  </span>
                   <select
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
                     value={parser}
@@ -1086,7 +1239,7 @@ export default function App() {
                 </label>
                 <label className="block text-sm">
                   <span className="mb-1 block text-gray-400">
-                    Broker (custody)
+                    Default custody
                   </span>
                   <select
                     className="w-full rounded-lg border border-gray-700 bg-gray-900 px-3 py-2"
@@ -1101,29 +1254,132 @@ export default function App() {
                   </select>
                 </label>
               </div>
-              <label className="mt-4 block text-sm">
-                <span className="mb-1 block text-gray-400">CSV or XLSX</span>
+              <p className="mt-2 text-xs text-gray-500">
+                Auto detects Stake XLSX, broker CSVs, and (when enabled)
+                issuer PDFs. Set custody per file for issuer statements.
+              </p>
+
+              <label
+                onDrop={onDrop}
+                onDragOver={onDragOver}
+                onDragLeave={onDragLeave}
+                className={`mt-4 flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border-2 border-dashed px-4 py-8 text-center text-sm transition-colors ${
+                  dragActive
+                    ? "border-emerald-500 bg-emerald-500/10 text-emerald-200"
+                    : "border-gray-700 text-gray-400 hover:border-gray-600"
+                }`}
+              >
+                <span>Drag &amp; drop CSV/XLSX files here, or click to browse</span>
+                <span className="text-xs text-gray-600">
+                  Stake PDF isn’t supported — use the XLSX export from Tax &amp;
+                  Documents.
+                </span>
                 <input
                   type="file"
+                  multiple
                   accept=".csv,.xlsx,.xls,text/csv"
-                  className="block w-full text-sm text-gray-300 file:mr-3 file:rounded-lg file:border-0 file:bg-emerald-500/20 file:px-3 file:py-2 file:text-emerald-200"
-                  onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+                  className="hidden"
+                  onChange={(e) => {
+                    if (e.target.files?.length) addFiles(e.target.files);
+                    e.target.value = "";
+                  }}
                 />
               </label>
+
+              {files.length > 0 && (
+                <div className="mt-4 divide-y divide-gray-800 rounded-lg border border-gray-800">
+                  {files.map((item) => (
+                    <div
+                      key={item.key}
+                      className="flex flex-wrap items-center gap-2 px-3 py-2 text-sm"
+                    >
+                      <div className="min-w-[140px] flex-1">
+                        <div className="truncate text-gray-200">
+                          {item.file.name}
+                        </div>
+                        <div className="text-[10px] text-gray-500">
+                          {(item.file.size / 1024).toFixed(1)} KB
+                        </div>
+                      </div>
+                      <select
+                        className="rounded-lg border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300"
+                        value={item.parserOverride ?? ""}
+                        onChange={(e) => setItemParser(item.key, e.target.value)}
+                        disabled={
+                          item.status === "importing" || item.status === "done"
+                        }
+                      >
+                        <option value="">
+                          Default (
+                          {PARSERS.find((p) => p.id === parser)?.label ??
+                            parser}
+                          )
+                        </option>
+                        {PARSERS.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.label}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        className="rounded-lg border border-gray-700 bg-gray-900 px-2 py-1 text-xs text-gray-300"
+                        value={item.custodyOverride}
+                        onChange={(e) =>
+                          setItemCustody(item.key, e.target.value)
+                        }
+                        disabled={
+                          item.status === "importing" || item.status === "done"
+                        }
+                      >
+                        <option value="">Auto (from detected broker)</option>
+                        {BROKERS.map((b) => (
+                          <option key={b.id} value={b.id}>
+                            {b.label}
+                          </option>
+                        ))}
+                      </select>
+                      <FileStatusBadge item={item} />
+                      <button
+                        type="button"
+                        onClick={() => removeFile(item.key)}
+                        disabled={item.status === "importing"}
+                        className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-gray-300 disabled:opacity-40"
+                      >
+                        Remove
+                      </button>
+                      {item.status === "error" && item.error && (
+                        <p className="w-full text-xs text-red-300">
+                          {item.error}
+                        </p>
+                      )}
+                      {item.status === "done" &&
+                        item.result &&
+                        item.result.warnings.length > 0 && (
+                          <p className="w-full text-xs text-amber-200/80">
+                            {item.result.warnings.length} warning
+                            {item.result.warnings.length === 1 ? "" : "s"} ·{" "}
+                            {item.result.warnings[0]?.message}
+                          </p>
+                        )}
+                    </div>
+                  ))}
+                </div>
+              )}
+
               <button
                 type="button"
-                disabled={busy || !file}
+                disabled={busy || !files.some((f) => f.status === "ready")}
                 onClick={() => void onImport()}
                 className="mt-5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
               >
-                {busy ? "Importing…" : "Import"}
+                {busy
+                  ? "Importing…"
+                  : `Import ready (${
+                      files.filter((f) => f.status === "ready").length
+                    })`}
               </button>
-              {importResult && (
-                <p className="mt-3 text-sm text-emerald-300">
-                  Imported {importResult.imported} / {importResult.parsed} ·
-                  source {importResult.source} · broker {importResult.broker}
-                </p>
-              )}
+
+              <ImportBatchSummary files={files} />
             </Panel>
           )}
 
@@ -1672,6 +1928,95 @@ function Panel({
 
 function Empty({ hint }: { hint: string }) {
   return <p className="text-sm text-gray-500">{hint}</p>;
+}
+
+function FileStatusBadge({ item }: { item: FileQueueItem }) {
+  const base =
+    "inline-block rounded-md px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide";
+  switch (item.status) {
+    case "ready":
+      return (
+        <span className={`${base} bg-emerald-500/15 text-emerald-300`}>
+          Ready
+        </span>
+      );
+    case "needs_custody":
+      return (
+        <span className={`${base} bg-amber-500/15 text-amber-200`}>
+          Set custody
+        </span>
+      );
+    case "unsupported":
+      return (
+        <span
+          className={`${base} bg-red-500/15 text-red-300`}
+          title="Use Stake XLSX from Tax & Documents, not the PDF."
+        >
+          Unsupported
+        </span>
+      );
+    case "importing":
+      return (
+        <span className={`${base} bg-gray-500/20 text-gray-300`}>
+          Importing…
+        </span>
+      );
+    case "done":
+      return (
+        <span className={`${base} bg-emerald-500/15 text-emerald-300`}>
+          {item.result
+            ? `Imported ${item.result.imported}/${item.result.parsed}`
+            : "Done"}
+        </span>
+      );
+    case "error":
+      return (
+        <span
+          className={`${base} bg-red-500/15 text-red-300`}
+          title={item.error ?? undefined}
+        >
+          Error
+        </span>
+      );
+  }
+}
+
+function ImportBatchSummary({ files }: { files: FileQueueItem[] }) {
+  const done = files.filter((f) => f.status === "done" && f.result);
+  const errored = files.filter((f) => f.status === "error");
+  const unsupported = files.filter((f) => f.status === "unsupported");
+  if (!done.length && !errored.length) return null;
+  const totals = done.reduce(
+    (acc, f) => ({
+      imported: acc.imported + (f.result?.imported ?? 0),
+      parsed: acc.parsed + (f.result?.parsed ?? 0),
+      duplicatesSkipped: acc.duplicatesSkipped + (f.result?.duplicatesSkipped ?? 0),
+    }),
+    { imported: 0, parsed: 0, duplicatesSkipped: 0 },
+  );
+  return (
+    <div className="mt-3 rounded-lg border border-gray-800 bg-gray-900/60 px-3 py-2 text-sm">
+      {done.length > 0 && (
+        <p className="text-emerald-300">
+          Imported {totals.imported} / {totals.parsed} across {done.length}{" "}
+          file{done.length === 1 ? "" : "s"} · {totals.duplicatesSkipped}{" "}
+          duplicates skipped
+        </p>
+      )}
+      {errored.length > 0 && (
+        <p className="mt-1 text-red-300">
+          {errored.length} file{errored.length === 1 ? "" : "s"} failed to
+          import
+        </p>
+      )}
+      {unsupported.length > 0 && (
+        <p className="mt-1 text-gray-500">
+          {unsupported.length} unsupported file
+          {unsupported.length === 1 ? "" : "s"} skipped
+        </p>
+      )}
+    </div>
+  );
 }
 
 function ExchangeBadge({

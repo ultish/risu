@@ -993,6 +993,8 @@ app.post("/api/import", async (c) => {
     ),
     warnings: parsed.warnings,
     preview: parsed.transactions.slice(0, 20),
+    layoutId: parsed.layoutId ?? null,
+    confidence: parsed.confidence ?? null,
   });
 });
 
