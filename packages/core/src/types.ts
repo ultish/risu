@@ -62,6 +62,9 @@ export const ParseResult = z.object({
   transactions: z.array(ParsedTransaction),
   warnings: z.array(ParseWarning),
   skippedRows: z.number().default(0),
+  /** Optional layout fingerprint (multi-source import); see parse/layouts.ts */
+  layoutId: z.string().optional(),
+  confidence: z.enum(["high", "low", "none"]).optional(),
 });
 export type ParseResult = z.infer<typeof ParseResult>;
 

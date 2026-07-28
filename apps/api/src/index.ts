@@ -20,6 +20,7 @@ import {
   holdingPriceKey,
   listInstrumentSeeds,
   parseBrokerFile,
+  resolveForcedBroker,
   parseSharesightPaste,
   parseYahooManualPayload,
   resolveInstrumentAssumptions,
@@ -815,7 +816,8 @@ app.post("/api/import", async (c) => {
   const body = await c.req.parseBody();
   const file = body["file"];
   const portfolioId = Number(body["portfolioId"] || body["accountId"]);
-  const parser = (body["broker"] as string | undefined) || "generic";
+  // Form field "broker" is the *parser* (or "auto"). Custody is separate.
+  const parserField = (body["broker"] as string | undefined) || "auto";
   const custodyBroker =
     (body["custody"] as string | undefined) ||
     (body["sourceBroker"] as string | undefined) ||
@@ -836,11 +838,32 @@ app.post("/api/import", async (c) => {
 
   const ab = await file.arrayBuffer();
   const filename = file.name || "upload.csv";
+  const forced = resolveForcedBroker(
+    parserField as BrokerId | "auto" | "" | null,
+  );
   const parsed = parseBrokerFile({
     content: Buffer.from(ab),
     filename,
-    broker: parser as BrokerId,
+    broker: forced ?? "auto",
   });
+
+  // PDF / empty unsupported: surface as 400 so UI shows the message clearly
+  if (
+    filename.toLowerCase().endsWith(".pdf") &&
+    parsed.transactions.length === 0 &&
+    parsed.warnings.some((w) => w.severity === "error")
+  ) {
+    return c.json(
+      {
+        error: parsed.warnings.find((w) => w.severity === "error")?.message,
+        warnings: parsed.warnings,
+        layoutId: parsed.layoutId,
+        parsed: 0,
+        imported: 0,
+      },
+      400,
+    );
+  }
 
   const source = sourceOverride || `file:${parsed.broker}`;
   const broker = custodyBroker || inferCustodyFromParser(parsed.broker);

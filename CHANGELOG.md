@@ -7,7 +7,12 @@ and this project aims to follow [Semantic Versioning](https://semver.org/spec/v2
 
 ## [Unreleased]
 
+### Planned
+- **Multi-layout import** phases 2–5 — [docs/import-layouts-plan.md](./docs/import-layouts-plan.md) (multi-file UI, PDF layouts, XLSX↔ledger reconcile). Phases 0–1 done (see Added).
+
 ### Added
+- **Import foundations (phase 0):** `LayoutId` / detect types; `broker: "auto"`; PDF uploads return a clear “not implemented — use Stake XLSX” error (no crash); `parseImportFile` alias; fixture dirs `fixtures/xlsx/stake`, `fixtures/pdf`
+- **Stake Tax & Documents multi-sheet XLSX**: Investment **Activity** merges Aus + Wall St equity sheets; Investment **Income** → `dividend_cash` (estimated). Detect via Summary “Report Type”. Trade Identifier → `externalId`; `Avg. Price` / `.ASX` ticker fixes. Empty FYs return 0 trades (info), not a hard error.
 - Planner instrument fill: BetaShares/Vanguard **seed** + optional manual **Refresh** (Yahoo trailing yield / hist. growth estimate); SQLite `instrument_cache` (once per click, not on page load)
 - **Manual Yahoo paste import**: when Node is 429’d, open browser URL → paste chart/spark/quote JSON via **Settings**, `POST /api/prices/import-yahoo`, or console `yields.importYahoo(json)` (also `yields.sparkUrl` / `yields.chartUrl`)
 - Yahoo failures and refresh responses include **lastUrl** / **yahooBrowserUrls** (spark, chart, quote) so you can open the same request in a browser

@@ -9,6 +9,19 @@ import {
   parseNumber,
 } from "./utils.js";
 
+function stakeExternalId(row: Record<string, string>): string | null {
+  return (
+    getField(
+      row,
+      "trade identifier",
+      "unique order id",
+      "order id",
+      "id",
+      "reference",
+    ) || null
+  );
+}
+
 /** Stake AU / US investment activity (CSV or sheet rows) */
 export function parseStakeRows(rows: Record<string, unknown>[]): ParseResult {
   const transactions: ParsedTransaction[] = [];
@@ -66,14 +79,26 @@ export function parseStakeRows(rows: Record<string, unknown>[]): ParseResult {
         "price",
         "average price",
         "avg price",
+        "avg. price",
         "fill price",
         "unit price",
       ),
     );
-    const brokerage =
+    const fees =
       parseNumber(getField(row, "fees", "fee", "brokerage", "commission")) ?? 0;
+    const gst = parseNumber(getField(row, "gst")) ?? 0;
+    const brokerage = Math.abs(fees) + Math.abs(gst);
+    // Prefer "Value" (pre-fee) over "Total Value" when both exist
     let amount = parseNumber(
-      getField(row, "amount", "value", "total", "net amount", "consideration"),
+      getField(
+        row,
+        "amount",
+        "value",
+        "net amount",
+        "consideration",
+        "total value",
+        "total",
+      ),
     );
 
     if (!ticker) {
@@ -92,8 +117,7 @@ export function parseStakeRows(rows: Record<string, unknown>[]): ParseResult {
         amount,
         brokerage: 0,
         currency,
-        externalId:
-          getField(row, "unique order id", "order id", "id") || null,
+        externalId: stakeExternalId(row),
         notes: details || side || "DRP/DRIP reinvest inferred",
         raw: row,
       });
@@ -116,8 +140,7 @@ export function parseStakeRows(rows: Record<string, unknown>[]): ParseResult {
           amount,
           brokerage: 0,
           currency,
-          externalId:
-            getField(row, "unique order id", "order id", "id") || null,
+          externalId: stakeExternalId(row),
           notes: details || side || null,
           raw: row,
         });
@@ -135,10 +158,9 @@ export function parseStakeRows(rows: Record<string, unknown>[]): ParseResult {
       quantity,
       price,
       amount,
-      brokerage: Math.abs(brokerage),
+      brokerage,
       currency,
-      externalId:
-        getField(row, "unique order id", "order id", "id", "reference") || null,
+      externalId: stakeExternalId(row),
       notes: details || side || null,
       raw: row,
     });

@@ -24,7 +24,7 @@ Primary holdings for this install (do not simplify the codebase down to only the
 - For performance MTM: ASX/Betashares → AUD (no FX); US → USD price × `AUDUSD` history → AUD. Cost from ledger currency as stored.
 - FX history cache priority in practice: **AUDUSD** (and any other pair only if a foreign quote currency appears).
 
-Read **README.md** for product intro, install, and dev instructions. Read **docs/import-sources.md** for broker/Sharesight import reality.
+Read **README.md** for product intro, install, and dev instructions. Read **docs/import-sources.md** for broker/Sharesight import reality. Read **docs/import-layouts-plan.md** for phased multi-file / PDF / Stake XLSX import work (Stake = XLSX only; no Stake PDF).
 
 ## Working rules
 

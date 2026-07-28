@@ -8,21 +8,53 @@ import { parseGenericRows } from "./generic.js";
 import { parseSelfwealthRows } from "./selfwealth.js";
 import { parseSharesightRows } from "./sharesight.js";
 import { parseStakeRows } from "./stake.js";
+import {
+  resolveForcedBroker,
+  unsupportedPdfResult,
+} from "./layouts.js";
+import {
+  detectStakeWorkbookKind,
+  parseStakeActivityWorkbook,
+  parseStakeIncomeWorkbook,
+  readWorkbook,
+} from "./stakeWorkbook.js";
 
 export { detectBroker } from "./detect.js";
 export { classifyType } from "./utils.js";
+export type {
+  DetectConfidence,
+  DetectResult,
+  LayoutId,
+} from "./layouts.js";
+export {
+  LAYOUT_LABELS,
+  resolveForcedBroker,
+  unsupportedPdfResult,
+} from "./layouts.js";
+export {
+  detectStakeWorkbookKind,
+  parseStakeActivityWorkbook,
+  parseStakeIncomeWorkbook,
+} from "./stakeWorkbook.js";
 
 export type ParseFileInput = {
-  /** File contents as UTF-8 text (CSV) or binary buffer (xlsx) */
+  /** File contents as UTF-8 text (CSV) or binary buffer (xlsx / pdf bytes) */
   content: string | ArrayBuffer | Buffer;
   filename: string;
-  /** Force broker; otherwise auto-detect from headers/filename */
-  broker?: BrokerId;
+  /**
+   * Force broker parser. Omit, `""`, or `"auto"` → detect from content.
+   * (UI Phase 2 sends `auto`.)
+   */
+  broker?: BrokerId | "auto";
 };
 
 function isExcel(filename: string): boolean {
   const f = filename.toLowerCase();
   return f.endsWith(".xlsx") || f.endsWith(".xls");
+}
+
+function isPdf(filename: string): boolean {
+  return filename.toLowerCase().endsWith(".pdf");
 }
 
 /** CommSec browser copy is often tab-separated; downloads are usually commas. */
@@ -120,30 +152,90 @@ function parseWithBroker(
   }
 }
 
+function toBuffer(content: string | ArrayBuffer | Buffer): Buffer {
+  if (typeof content === "string") return Buffer.from(content);
+  if (Buffer.isBuffer(content)) return content;
+  return Buffer.from(content);
+}
+
 /**
- * Parse a broker / Sharesight export into normalised transactions.
+ * Parse a broker / Sharesight / Stake export into normalised transactions.
  * DRP/DRIP rows become type=drp and update holdings like buys.
+ *
+ * - CSV / single-sheet XLSX: existing broker row parsers
+ * - Stake multi-sheet Tax XLSX: both Aus + Wall St sheets (Phase 1)
+ * - PDF: Phase 0 stub — structured error until layout parsers (Phase 3+)
+ *
+ * Alias: {@link parseImportFile}
  */
 export function parseBrokerFile(input: ParseFileInput): ParseResult {
-  const { filename, broker: forced } = input;
-  let rows: Record<string, unknown>[];
-  let sheetNote: string | null = null;
+  const { filename } = input;
+  const forced = resolveForcedBroker(input.broker);
+
+  // Phase 0: never throw on PDF — clear unsupported result (no pdf.js yet)
+  if (isPdf(filename)) {
+    return unsupportedPdfResult(filename);
+  }
 
   if (isExcel(filename)) {
-    const buf =
-      typeof input.content === "string"
-        ? Buffer.from(input.content)
-        : input.content;
-    const parsed = rowsFromExcel(buf as Buffer);
-    rows = parsed.rows;
-    sheetNote = parsed.sheetName;
-  } else {
-    const text =
-      typeof input.content === "string"
-        ? input.content
-        : Buffer.from(input.content as ArrayBuffer).toString("utf8");
-    rows = rowsFromCsv(text);
+    const buf = toBuffer(input.content);
+    const workbook = readWorkbook(buf);
+    const stakeKind = detectStakeWorkbookKind(workbook, filename);
+    const allowStake =
+      forced == null || forced === "stake" || forced === "generic";
+
+    if (stakeKind === "activity" && allowStake) {
+      const result = parseStakeActivityWorkbook(workbook);
+      result.layoutId = "stake.activity";
+      result.confidence = "high";
+      sortTransactions(result);
+      return result;
+    }
+    if (stakeKind === "income" && allowStake) {
+      const result = parseStakeIncomeWorkbook(workbook);
+      result.layoutId = "stake.income";
+      result.confidence = "high";
+      sortTransactions(result);
+      return result;
+    }
+
+    const parsed = rowsFromExcel(buf);
+    const rows = parsed.rows;
+    const sheetNote = parsed.sheetName;
+
+    if (!rows.length) {
+      return {
+        broker: forced ?? "generic",
+        transactions: [],
+        warnings: [
+          {
+            message:
+              "No data rows found in spreadsheet. Stake/Sharesight Excel exports are sometimes empty or header-only — try Google Sheets export (Sharesight) or another FY (Stake Tax & Documents → Investment activity). PDF is not supported yet.",
+            severity: "error",
+          },
+        ],
+        skippedRows: 0,
+      };
+    }
+
+    const headers = Object.keys(rows[0] ?? {});
+    const broker = forced ?? detectBroker(headers, filename);
+    const result = parseWithBroker(broker, rows);
+    if (sheetNote) {
+      result.warnings.unshift({
+        message: `Read Excel sheet “${sheetNote}”`,
+        severity: "info",
+      });
+    }
+    sortTransactions(result);
+    return result;
   }
+
+  const text =
+    typeof input.content === "string"
+      ? input.content
+      : Buffer.from(input.content as ArrayBuffer).toString("utf8");
+  const rows = rowsFromCsv(text);
 
   if (!rows.length) {
     return {
@@ -151,9 +243,7 @@ export function parseBrokerFile(input: ParseFileInput): ParseResult {
       transactions: [],
       warnings: [
         {
-          message: isExcel(filename)
-            ? "No data rows found in spreadsheet. Stake/Sharesight Excel exports are sometimes empty or header-only — try Google Sheets export (Sharesight) or another FY (Stake Tax & Documents → Investment activity). PDF is not supported yet."
-            : "No data rows found in file",
+          message: "No data rows found in file",
           severity: "error",
         },
       ],
@@ -164,19 +254,17 @@ export function parseBrokerFile(input: ParseFileInput): ParseResult {
   const headers = Object.keys(rows[0] ?? {});
   const broker = forced ?? detectBroker(headers, filename);
   const result = parseWithBroker(broker, rows);
+  sortTransactions(result);
+  return result;
+}
 
-  if (sheetNote) {
-    result.warnings.unshift({
-      message: `Read Excel sheet “${sheetNote}”`,
-      severity: "info",
-    });
-  }
+/** Preferred name for multi-source import (same as parseBrokerFile). */
+export const parseImportFile = parseBrokerFile;
 
+function sortTransactions(result: ParseResult): void {
   result.transactions.sort((a, b) => {
     const d = a.date.localeCompare(b.date);
     if (d !== 0) return d;
     return a.ticker.localeCompare(b.ticker);
   });
-
-  return result;
 }

@@ -53,6 +53,7 @@ export function normaliseTicker(raw: string): string {
     .toUpperCase()
     .replace(/^ASX:/i, "")
     .replace(/^US:/i, "")
+    .replace(/\.ASX$/i, "")
     .replace(/\.AX$/i, "")
     .replace(/\.AU$/i, "")
     .replace(/\.US$/i, "")
@@ -75,9 +76,12 @@ export function normaliseHeaderKey(raw: string): string {
     .toLowerCase()
     // collapse spaces around slash: "buy/ sell" → "buy/sell"
     .replace(/\s*\/\s*/g, "/")
+    // "Avg. Price" → "avg price" (Stake / broker headers with mid-dot abbreviations)
+    .replace(/\./g, " ")
     // collapse remaining whitespace
     .replace(/\s+/g, " ")
-    // drop trailing punctuation noise: "brokerage (inc gst.)" stays readable
+    .trim()
+    // drop trailing punctuation noise
     .replace(/\s*\.\s*$/g, "");
 }
 
