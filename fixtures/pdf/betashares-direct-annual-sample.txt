@@ -1,0 +1,40 @@
+Betashares Capital Ltd ABN 78 139 566 868 AFSL 341181 is the issuer of Betashares Invest Fund ARSN 667 811 627, the IDPS-like scheme available through Betashares Direct.
+Page 1 of 3
+Betashares Direct Annual Statement
+Period ending 30 June 2026
+Account nameSample Investor
+Account number0000000
+Tax File Number (TFN)Supplied
+Account typeIndividual
+Statement period:1 July 2025 - 30 June 2026
+Statement issue date:Tuesday, 28 July, 2026
+Your account summary
+Opening balance as at 01 July 2025$0.00
+Deposits into the cash account$1,000.00
+Withdrawals from the cash account$0.00
+Direct fees and costs($6.00)
+Income from investments$5.76
+Closing Balance as at 30 June 2026$500.00
+
+Betashares Capital Ltd ABN 78 139 566 868 AFSL 341181 is the issuer of Betashares Invest Fund ARSN 667 811 627, the IDPS-like scheme available through Betashares Direct.
+Page 2 of 3
+Account value as at 30 June 2026
+Custom Portfolio holding(s)
+Betashares NASDAQ 100 ETF (NDQ)10.0000$50.000$500.00$0.00$500.00100.00%
+Total$500.00$500.00100.00%
+
+Betashares Capital Ltd ABN 78 139 566 868 AFSL 341181 is the issuer of Betashares Invest Fund ARSN 667 811 627, the IDPS-like scheme available through Betashares Direct.
+Page 3 of 3
+Transaction list
+E ective DateActivity typeDescriptionGross ValueTransaction costNet Value
+01/08/2025DepositDeposit into your cash account$500.00$0.00$500.00
+01/08/2025BuyNDQ (5.0000 units @ $40.00)($200.00)$0.00($200.00)
+01/08/2025BuyBGBL (2.0000 units @ $50.00)($100.00)$0.00($100.00)
+15/09/2025SellBGBL (1.0000 units @ $55.00)$55.00$0.00$55.00
+01/10/2025FeesSeptember-2025 Auto-pilot fees cha ged($3.00)$0.00($3.00)
+17/01/2026DistributionNDQ @ $0.5760 per unit$5.76$0.00$5.76
+01/02/2026DepositDeposit into your cash account$500.00$0.00$500.00
+01/02/2026BuyNDQ (5.0000 units @ $50.00)($250.00)$0.00($250.00)
+01/06/2026FeesMay-2026 Auto-pilot fees cha ged($3.00)$0.00($3.00)
+Total($495.24)$0.00($495.24)
+All fees and costs in the table above include Goods and Services Tax (“GST”) net of any reduced input tax credits.

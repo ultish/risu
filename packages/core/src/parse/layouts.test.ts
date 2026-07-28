@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { parseBrokerFile, parseImportFile, resolveForcedBroker } from "./index.js";
 
 describe("Phase 0 foundations", () => {
-  it("resolveForcedBroker treats auto/empty as detect", () => {
+  it("resolveForcedBroker treats auto/empty as detect", async () => {
     expect(resolveForcedBroker("auto")).toBeUndefined();
     expect(resolveForcedBroker("")).toBeUndefined();
     expect(resolveForcedBroker(null)).toBeUndefined();
@@ -10,8 +10,8 @@ describe("Phase 0 foundations", () => {
     expect(resolveForcedBroker("stake")).toBe("stake");
   });
 
-  it("PDF returns structured unsupported result (no throw)", () => {
-    const result = parseBrokerFile({
+  it("PDF returns structured unsupported result (no throw)", async () => {
+    const result = await parseBrokerFile({
       content: Buffer.from("%PDF-1.4 fake"),
       filename: "annual-2025.pdf",
       broker: "auto",
@@ -30,12 +30,12 @@ describe("Phase 0 foundations", () => {
     ).toBe(true);
   });
 
-  it("parseImportFile is alias of parseBrokerFile", () => {
-    const a = parseImportFile({
+  it("parseImportFile is alias of parseBrokerFile", async () => {
+    const a = await parseImportFile({
       content: Buffer.from("%PDF"),
       filename: "x.pdf",
     });
-    const b = parseBrokerFile({
+    const b = await parseBrokerFile({
       content: Buffer.from("%PDF"),
       filename: "x.pdf",
     });
@@ -43,11 +43,11 @@ describe("Phase 0 foundations", () => {
     expect(a.warnings[0]?.message).toBe(b.warnings[0]?.message);
   });
 
-  it("broker auto still parses CSV via detect", () => {
+  it("broker auto still parses CSV via detect", async () => {
     const csv = `Date,Symbol,Side,Quantity,Price,Fees,Currency,Market,Unique Order Id
 2022-01-15,AAPL,Buy,10,150.00,0,USD,NASDAQ,STK1
 `;
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: csv,
       filename: "stake.csv",
       broker: "auto",

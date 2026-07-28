@@ -131,14 +131,14 @@ function buildIncomeWorkbook(opts: {
 }
 
 describe("normaliseTicker", () => {
-  it("strips .ASX suffix", () => {
+  it("strips .ASX suffix", async () => {
     expect(normaliseTicker("VAS.ASX")).toBe("VAS");
     expect(normaliseTicker("vgs.asx")).toBe("VGS");
   });
 });
 
 describe("Stake activity workbook", () => {
-  it("merges Aus + Wall St sheets and maps Trade Identifier / Avg. Price", () => {
+  it("merges Aus + Wall St sheets and maps Trade Identifier / Avg. Price", async () => {
     const buf = buildActivityWorkbook({
       aus: [
         {
@@ -173,7 +173,7 @@ describe("Stake activity workbook", () => {
       ],
     });
 
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: buf,
       filename: "annual-2025.xlsx",
     });
@@ -205,7 +205,7 @@ describe("Stake activity workbook", () => {
     });
   });
 
-  it("maps sells with negative units and abs quantity", () => {
+  it("maps sells with negative units and abs quantity", async () => {
     const buf = buildActivityWorkbook({
       wall: [
         {
@@ -223,7 +223,7 @@ describe("Stake activity workbook", () => {
       ],
     });
 
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: buf,
       filename: "annual-2021.xlsx",
       broker: "stake",
@@ -239,9 +239,9 @@ describe("Stake activity workbook", () => {
     });
   });
 
-  it("empty equity sheets → 0 txs with info warning (not hard error)", () => {
+  it("empty equity sheets → 0 txs with info warning (not hard error)", async () => {
     const buf = buildActivityWorkbook({ aus: [], wall: [] });
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: buf,
       filename: "annual-2022.xlsx",
     });
@@ -256,7 +256,7 @@ describe("Stake activity workbook", () => {
 });
 
 describe("Stake income workbook", () => {
-  it("maps AU dividends to dividend_cash with qty 0 (Units is holding size)", () => {
+  it("maps AU dividends to dividend_cash with qty 0 (Units is holding size)", async () => {
     const buf = buildIncomeWorkbook({
       aus: [
         {
@@ -274,7 +274,7 @@ describe("Stake income workbook", () => {
       ],
     });
 
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: buf,
       filename: "dividends-2024.xlsx",
     });
@@ -300,10 +300,10 @@ describe("jimmy Stake corpus (local, optional)", () => {
 
   const hasJimmy = fs.existsSync(jimmyStake);
 
-  it.skipIf(!hasJimmy)("annual-2025.xlsx → 7 TSLA buys with trade ids", () => {
+  it.skipIf(!hasJimmy)("annual-2025.xlsx → 7 TSLA buys with trade ids", async () => {
     const file = path.join(jimmyStake, "annual-2025.xlsx");
     const buf = fs.readFileSync(file);
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: buf,
       filename: "annual-2025.xlsx",
     });
@@ -327,10 +327,10 @@ describe("jimmy Stake corpus (local, optional)", () => {
     );
   });
 
-  it.skipIf(!hasJimmy)("annual-2021.xlsx → 3 TSLA sells", () => {
+  it.skipIf(!hasJimmy)("annual-2021.xlsx → 3 TSLA sells", async () => {
     const file = path.join(jimmyStake, "annual-2021.xlsx");
     const buf = fs.readFileSync(file);
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: buf,
       filename: "annual-2021.xlsx",
     });
@@ -340,10 +340,10 @@ describe("jimmy Stake corpus (local, optional)", () => {
     expect(tsla.every((t) => t.externalId)).toBeTruthy();
   });
 
-  it.skipIf(!hasJimmy)("empty FY annual-2022 → 0 transactions", () => {
+  it.skipIf(!hasJimmy)("empty FY annual-2022 → 0 transactions", async () => {
     const file = path.join(jimmyStake, "annual-2022.xlsx");
     const buf = fs.readFileSync(file);
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: buf,
       filename: "annual-2022.xlsx",
     });
