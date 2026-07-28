@@ -150,14 +150,18 @@ function fileQueueKey(file: File) {
  * "ready" even though the real detected broker (only known post-parse) might
  * resolve to null custody server-side — an intentional v1 simplification
  * (docs/import-layouts-plan.md §10.3 "detect without extra endpoint").
+ *
+ * PDFs are no longer flagged `unsupported` client-side (Phase 3 added a real
+ * Betashares Direct PDF layout) — the client can't tell a Stake PDF from an
+ * issuer PDF by filename alone, so both flow through as "ready" and the
+ * server's per-file error surfacing (`item.status = "error"` from the 400
+ * `unsupportedPdfResult` response) is what actually rejects a Stake PDF.
  */
 function classifyItem(
-  file: File,
   parserOverride: string | null,
   custodyOverride: string,
   globalParser: string,
 ): FileItemStatus {
-  if (/\.pdf$/i.test(file.name)) return "unsupported";
   const effectiveParser = parserOverride ?? globalParser;
   if (NO_CUSTODY_PARSERS.has(effectiveParser) && custodyOverride === "") {
     return "needs_custody";
@@ -477,7 +481,6 @@ export default function App() {
           ? {
               ...item,
               status: classifyItem(
-                item.file,
                 null,
                 item.custodyOverride,
                 parser,
@@ -501,7 +504,7 @@ export default function App() {
           file: f,
           parserOverride: null,
           custodyOverride: importBroker,
-          status: classifyItem(f, null, importBroker, parser),
+          status: classifyItem(null, importBroker, parser),
           result: null,
           error: null,
           reconcile: null,
@@ -525,7 +528,7 @@ export default function App() {
         return {
           ...i,
           parserOverride,
-          status: classifyItem(i.file, parserOverride, i.custodyOverride, parser),
+          status: classifyItem(parserOverride, i.custodyOverride, parser),
         };
       }),
     );
@@ -538,7 +541,7 @@ export default function App() {
           ? {
               ...i,
               custodyOverride: value,
-              status: classifyItem(i.file, i.parserOverride, value, parser),
+              status: classifyItem(i.parserOverride, value, parser),
             }
           : i,
       ),
@@ -1317,8 +1320,9 @@ export default function App() {
                 </label>
               </div>
               <p className="mt-2 text-xs text-gray-500">
-                Auto detects Stake XLSX, broker CSVs, and (when enabled)
-                issuer PDFs. Set custody per file for issuer statements.
+                Auto detects Stake XLSX, broker CSVs, and Betashares Direct
+                annual statement PDFs. Set custody per file for issuer
+                statements.
               </p>
 
               <label
@@ -1331,15 +1335,19 @@ export default function App() {
                     : "border-gray-700 text-gray-400 hover:border-gray-600"
                 }`}
               >
-                <span>Drag &amp; drop CSV/XLSX files here, or click to browse</span>
+                <span>
+                  Drag &amp; drop CSV/XLSX/PDF files here, or click to browse
+                </span>
                 <span className="text-xs text-gray-600">
-                  Stake PDF isn’t supported — use the XLSX export from Tax &amp;
-                  Documents.
+                  Betashares Direct annual statement PDFs import automatically.
+                  Stake PDF still isn’t supported — use the XLSX export from
+                  Tax &amp; Documents instead (a Stake PDF will show as an
+                  error after import, not silently).
                 </span>
                 <input
                   type="file"
                   multiple
-                  accept=".csv,.xlsx,.xls,text/csv"
+                  accept=".csv,.xlsx,.xls,.pdf,text/csv"
                   className="hidden"
                   onChange={(e) => {
                     if (e.target.files?.length) addFiles(e.target.files);

@@ -58,7 +58,11 @@ export function registerReconcileRoutes(
     const buf = Buffer.from(await file.arrayBuffer());
 
     // Force the Stake parser — reconcile is XLSX-only and Stake-specific.
-    const parsed = parseBrokerFile({ content: buf, filename, broker: "stake" });
+    const parsed = await parseBrokerFile({
+      content: buf,
+      filename,
+      broker: "stake",
+    });
     if (parsed.layoutId !== "stake.activity") {
       return c.json(
         {

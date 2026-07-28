@@ -843,7 +843,7 @@ app.post("/api/import", async (c) => {
   const forced = resolveForcedBroker(
     parserField as BrokerId | "auto" | "" | null,
   );
-  const parsed = parseBrokerFile({
+  const parsed = await parseBrokerFile({
     content: Buffer.from(ab),
     filename,
     broker: forced ?? "auto",

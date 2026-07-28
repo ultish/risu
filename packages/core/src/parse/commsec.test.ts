@@ -35,8 +35,8 @@ const liveConfirmationsCsv = `Confirmation Number,Order Number,Trade Date,Buy/ S
 `;
 
 describe("CommSec parser + holdings", () => {
-  it("parses buys, DRP, sells and updates holdings", () => {
-    const result = parseBrokerFile({
+  it("parses buys, DRP, sells and updates holdings", async () => {
+    const result = await parseBrokerFile({
       content: confirmationsCsv,
       filename: "commsec-confirmations.csv",
       broker: "commsec",
@@ -60,8 +60,8 @@ describe("CommSec parser + holdings", () => {
     expect(vas.costBase).toBeGreaterThan(0);
   });
 
-  it("parses live Confirmations CSV (B/S, Security, Units, Net Proceeds)", () => {
-    const result = parseBrokerFile({
+  it("parses live Confirmations CSV (B/S, Security, Units, Net Proceeds)", async () => {
+    const result = await parseBrokerFile({
       content: liveConfirmationsCsv,
       filename: "commsec-confirmations.csv",
       broker: "commsec",
@@ -92,8 +92,8 @@ describe("CommSec parser + holdings", () => {
     expect(holdings.find((h) => h.ticker === "LYC")!.quantity).toBe(187);
   });
 
-  it("auto-detects live Confirmations headers as commsec and maps B/S", () => {
-    const result = parseBrokerFile({
+  it("auto-detects live Confirmations headers as commsec and maps B/S", async () => {
+    const result = await parseBrokerFile({
       content: liveConfirmationsCsv,
       filename: "export.csv", // no "commsec" in name
     });
@@ -104,12 +104,12 @@ describe("CommSec parser + holdings", () => {
     expect(result.transactions.filter((t) => t.type === "buy")).toHaveLength(6);
   });
 
-  it("maps Buy/ Sell with odd spacing via generic path B/S tokens", () => {
+  it("maps Buy/ Sell with odd spacing via generic path B/S tokens", async () => {
     const csv = `Trade Date,Buy / Sell,Security,Units,Average Price ($),Net Proceeds ($)
 18/10/2017,B,VGS,15,63.13,956.95
 23/03/2026,S,AUZ,10,1.00,10.00
 `;
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: csv,
       filename: "x.csv",
       broker: "generic",
@@ -120,21 +120,21 @@ describe("CommSec parser + holdings", () => {
     ]);
   });
 
-  it("auto-detects commsec from filename", () => {
-    const result = parseBrokerFile({
+  it("auto-detects commsec from filename", async () => {
+    const result = await parseBrokerFile({
       content: confirmationsCsv,
       filename: "my-commsec-export.csv",
     });
     expect(result.broker).toBe("commsec");
   });
 
-  it("parses tab-separated Confirmations paste (browser copy)", () => {
+  it("parses tab-separated Confirmations paste (browser copy)", async () => {
     const tsv = [
       "Confirmation Number\tOrder Number\tTrade Date\tBuy/ Sell\tSecurity\tUnits\tAverage Price ($)\tBrokerage (inc GST.)\tNet Proceeds ($)\tSettlement Date\tConfirmation Status",
       "173136605\tN213664045\t23/03/2026\tS\tAUZ\t2335\t0.015\t4.99\t30.04\t25/03/2026\tConfirmed",
       "91935202\tN110263900\t16/08/2019\tB\tLYC\t187\t2.680\t10.00\t511.16\t20/08/2019\tConfirmed",
     ].join("\n");
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: tsv,
       filename: "paste.tsv",
       broker: "commsec",
@@ -151,7 +151,7 @@ describe("CommSec parser + holdings", () => {
 });
 
 describe("multi-market", () => {
-  it("infers US from currency/market", () => {
+  it("infers US from currency/market", async () => {
     expect(inferExchangeAndCurrency({ currency: "USD", ticker: "AAPL" })).toEqual({
       exchange: "US",
       currency: "USD",
@@ -164,8 +164,8 @@ describe("multi-market", () => {
     expect(toYahooSymbol("VAS", "ASX")).toBe("VAS.AX");
   });
 
-  it("parses Stake AU + US with DRIP", () => {
-    const result = parseBrokerFile({
+  it("parses Stake AU + US with DRIP", async () => {
+    const result = await parseBrokerFile({
       content: stakeUsCsv,
       filename: "stake-activity.csv",
       broker: "stake",
@@ -193,8 +193,8 @@ describe("multi-market", () => {
     expect(hAapl.marketValueAud!).toBeCloseTo((170 * 10.5) / 0.65, 0);
   });
 
-  it("parses Selfwealth mixed markets", () => {
-    const result = parseBrokerFile({
+  it("parses Selfwealth mixed markets", async () => {
+    const result = await parseBrokerFile({
       content: selfwealthCsv,
       filename: "selfwealth-report.csv",
       broker: "selfwealth",
@@ -208,13 +208,13 @@ describe("multi-market", () => {
     );
   });
 
-  it("parses Sharesight All Trades style export", () => {
+  it("parses Sharesight All Trades style export", async () => {
     const csv = `Trade Date,Instrument Code,Market Code,Transaction Type,Quantity,Price,Brokerage,Value,Currency,Comments
 2020-03-15,VAS,ASX,BUY,50,75.20,10.00,3760.00,AUD,
 2021-06-01,VAS,ASX,DRP,1.85,88.40,0,163.54,AUD,Dividend reinvestment
 2022-01-15,AAPL,NASDAQ,BUY,10,150.00,0,1500.00,USD,
 `;
-    const result = parseBrokerFile({
+    const result = await parseBrokerFile({
       content: csv,
       filename: "sharesight-all-trades.csv",
       broker: "sharesight",

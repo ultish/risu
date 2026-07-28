@@ -18,6 +18,9 @@ import {
   parseStakeIncomeWorkbook,
   readWorkbook,
 } from "./stakeWorkbook.js";
+import { extractPdf } from "./pdf/extract.js";
+import { detectPdfLayout } from "./pdf/detect.js";
+import { getLayoutParser } from "./pdf/registry.js";
 
 export { detectBroker } from "./detect.js";
 export { classifyType } from "./utils.js";
@@ -38,6 +41,15 @@ export {
   parseStakeIncomeWorkbook,
   readWorkbook,
 } from "./stakeWorkbook.js";
+export { extractPdf } from "./pdf/extract.js";
+export type { ExtractedPdf } from "./pdf/extract.js";
+export { detectPdfLayout } from "./pdf/detect.js";
+export { LAYOUT_PARSERS, getLayoutParser } from "./pdf/registry.js";
+export type {
+  LayoutParser,
+  LayoutParseInput,
+  LayoutScoreInput,
+} from "./pdf/types.js";
 
 export type ParseFileInput = {
   /** File contents as UTF-8 text (CSV) or binary buffer (xlsx / pdf bytes) */
@@ -166,17 +178,47 @@ function toBuffer(content: string | ArrayBuffer | Buffer): Buffer {
  *
  * - CSV / single-sheet XLSX: existing broker row parsers
  * - Stake multi-sheet Tax XLSX: both Aus + Wall St sheets (Phase 1)
- * - PDF: Phase 0 stub — structured error until layout parsers (Phase 3+)
+ * - PDF: extractPdf → registry detect → layout.parse (Phase 3+); unregistered
+ *   layouts (incl. Stake PDF, out of scope forever) fall back to
+ *   `unsupportedPdfResult`
+ *
+ * Async since PDF extraction (`pdf-parse`) is inherently async — CSV/XLSX
+ * branches resolve immediately.
  *
  * Alias: {@link parseImportFile}
  */
-export function parseBrokerFile(input: ParseFileInput): ParseResult {
+export async function parseBrokerFile(
+  input: ParseFileInput,
+): Promise<ParseResult> {
   const { filename } = input;
   const forced = resolveForcedBroker(input.broker);
 
-  // Phase 0: never throw on PDF — clear unsupported result (no pdf.js yet)
   if (isPdf(filename)) {
-    return unsupportedPdfResult(filename);
+    const buf = toBuffer(input.content);
+    let text = "";
+    try {
+      const extracted = await extractPdf(buf);
+      text = extracted.text;
+    } catch {
+      // Not a readable/born-digital PDF (scanned image, corrupt file, …) —
+      // fall through to the structured unsupported result below.
+      return unsupportedPdfResult(filename);
+    }
+
+    const detected = detectPdfLayout({ filename, text });
+    const layout =
+      detected.layoutId === "unknown"
+        ? undefined
+        : getLayoutParser(detected.layoutId);
+    if (!layout) {
+      return unsupportedPdfResult(filename);
+    }
+
+    const result = layout.parse({ content: buf, filename, text });
+    result.layoutId = detected.layoutId;
+    result.confidence = detected.confidence;
+    sortTransactions(result);
+    return result;
   }
 
   if (isExcel(filename)) {
