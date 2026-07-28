@@ -1,0 +1,39 @@
+Name of Fund:BETASHARES NASDAQ 100 ETF
+Responsible Entity:BETASHARES CAPITAL LTD
+TFN/ABN:QUOTED
+Statement Period:01/01/2023 to 31/12/2023
+Unitholder Number:X*******0000
+ANNUAL STATEMENT
+Transaction Details
+DateTransaction DetailsUnitsBalancePrice
+1
+Value
+2
+01/01/2023Opening Balance3838$24.98122900$949.29
+18/07/2023ALLOTMENT Dividend Plan Allotment139
+14/12/2023
+MISCELLANEOUS TRANSACTION
+Holding Net Movement (CHESS 510)
+544
+31/12/2023Closing Balance044$37.38125800$1,644.78
+1.The unit price shown for the balance is the net asset value per unit for the relevant date (or for the most recent business day if the
+relevant date is not a business day). The statement does not show the market price at which you executed a transaction on the ASX (or
+the total dollar value of your transaction) as this information is not provided to Betashares.
+2.The Value of your investment shown for the balance is equal to the number of units multiplied by the net asset value per unit for the relevant
+date.
+3.A transaction described as "Holding Net Movement" refers to an increase or decrease in your holding due to a purchase or sale, as the
+case requires.
+4.A transaction described as "Issuer Sponsored to CHESS Transfer" means your units in the Fund have been transferred for registration in
+the CHESS system at your request.
+All Registry communications to:
+C/- Link Market Services Limited
+Telephone: +61 1300 202 738
+ASX Code: NDQ
+Email: betashares@linkmarketservices.com.au
+
+Distribution Details
+Period Ended
+UnitsDistribution RateDistributionTax WithheldNet Distribution
+31/12/202238$0.03102880$1.18$0.00$1.18
+30/06/202338$0.78268588$29.74$0.00$29.74
+Total*$30.92$0.00$30.92

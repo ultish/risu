@@ -1,0 +1,67 @@
+X0000000000
+Annual Statement
+iShares Core S&P/ASX 200 ETF
+Statement for period: 1 July 2023 to 30 June 2024
+ASX Code: IOZ
+Date: 17th December 2024
+Holder Number:
+This statement represents a corrected Annual Statement for the period 1 July 2023 to 30 June 2024 for your
+holding in iShares Core S&P/ASX 200 ETF (IOZ). Please refer to the last page for the glossary of terms and
+calculation methodologies.
+Computershare Investor Services Pty Limited
+GPO Box 2975
+Melbourne VIC 3001 Australia
+Date
+1
+Transaction ListUnit TransactionsUnit Price
+2
+Units Held
+3
+Unit Value
+4
+30/06/2023
+13/12/2023
+18/01/2024
+19/04/2024
+30/06/2024
+Opening Balance
+Purchase
+Distribution Reinvested
+Distribution Reinvested
+Closing Balance
+8
+-
+-
+$29.51
+$30.46
+$31.43
+0
+8
+8
+8
+8
+-
+-
+$236.00
+$244.00
+$251.00
+Cash Distribution Received-
+Distribution Reinvestment Cash Balance
+Date
+1
+Balance
+30/06/2023
+18/01/2024
+19/04/2024
+30/06/2024
+-
+$1.70
+$4.23
+$4.23
+
+Glossary of terms
+Notes
+1
+Unit Price – If you have purchased or sold units during the statement period, the unit price (Net Asset
+Value {NAV} as at close of business) has not been included as Vanguard/iShares does not
+have access to the price at which you bought or sold your ETF units.
