@@ -248,7 +248,7 @@ export default function App() {
   const [txs, setTxs] = useState<TxRow[]>([]);
 
   const [parser, setParser] = useState("auto");
-  const [importBroker, setImportBroker] = useState("commsec");
+  const [importBroker, setImportBroker] = useState("");
   const [files, setFiles] = useState<FileQueueItem[]>([]);
   const [dragActive, setDragActive] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -1315,6 +1315,7 @@ export default function App() {
                     value={importBroker}
                     onChange={(e) => setImportBroker(e.target.value)}
                   >
+                    <option value="">Auto (from detected broker)</option>
                     {BROKERS.map((b) => (
                       <option key={b.id} value={b.id}>
                         {b.label}
@@ -1325,8 +1326,8 @@ export default function App() {
               </div>
               <p className="mt-2 text-xs text-gray-500">
                 Auto detects Stake XLSX, broker CSVs, and Betashares Direct
-                annual statement PDFs. Set custody per file for issuer
-                statements.
+                annual statement PDFs. Custody defaults to Auto too — set it
+                per file if an issuer statement needs a specific broker.
               </p>
 
               <label
