@@ -16,7 +16,11 @@ import { parseNumber } from "./utils.js";
  *   Edit
  *
  * Free-plan users often have this view when the All Trades Report is locked.
- * AU$ value is preferred for cost base (AU resident).
+ * Native trade currency (the US$/AU$ price line) is preferred, matching every
+ * other parser in this codebase (Stake, CommSec, …) — the ledger keeps native
+ * currency and `holdings.ts` converts to AUD via FX for display. The
+ * separately-shown "AU$ value" total (Sharesight's own FX conversion at trade
+ * date) is only used as a fallback when no native price line is present.
  */
 export function parseSharesightPaste(
   text: string,
@@ -174,13 +178,11 @@ function parseBlock(
     };
   }
 
-  // Prefer AU$ total when present (Sharesight already converted at trade FX)
-  if (valueAud != null && (valueIsAud || /au|a\$/i.test(valueField))) {
-    currency = "AUD";
-    amount = Math.abs(valueAud);
-    brokerage = 0;
-    if (quantity > 0) price = amount / quantity;
-  } else if (priceNative != null) {
+  // Prefer the native trade-currency price line — consistent with every
+  // other parser (Stake, CommSec, …), which keep native currency and let
+  // holdings.ts convert to AUD via FX. Fall back to Sharesight's own AU$
+  // total only when no native price line is present at all.
+  if (priceNative != null) {
     currency = detectCurrency(priceField) || "USD";
     amount =
       quantity > 0
@@ -188,6 +190,11 @@ function parseBlock(
         : null;
     brokerage = Math.abs(brokerageNative ?? 0);
     price = priceNative;
+  } else if (valueAud != null && (valueIsAud || /au|a\$/i.test(valueField))) {
+    currency = "AUD";
+    amount = Math.abs(valueAud);
+    brokerage = 0;
+    if (quantity > 0) price = amount / quantity;
   }
   if (quantity === 0 && type !== "dividend_cash") return null;
 
