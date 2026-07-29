@@ -205,19 +205,29 @@ const TX_TYPES = [
   "other",
 ] as const;
 
-function money(n: number | null | undefined, currency = "AUD") {
+/**
+ * `showCurrency`: append the ISO code (e.g. "$400.00 USD") for values whose
+ * currency varies row-to-row (Holdings/Transactions native-currency columns)
+ * — skip it for values already in a currency-labelled context (e.g. the
+ * "Cost base (AUD)" stat cards, or *Aud fields), where it'd be redundant.
+ */
+function money(
+  n: number | null | undefined,
+  currency = "AUD",
+  showCurrency = false,
+) {
   if (n == null || Number.isNaN(n)) return "—";
   try {
     // narrowSymbol: en-AU's default "symbol" display renders non-local
     // currencies as a bare code (e.g. "USD 400.00") instead of "$400.00" —
-    // narrowSymbol keeps a consistent "$" regardless of currency (the Mkt/
-    // exchange badge next to each row already disambiguates AUD vs USD).
-    return n.toLocaleString("en-AU", {
+    // narrowSymbol keeps a consistent "$" regardless of currency.
+    const formatted = n.toLocaleString("en-AU", {
       style: "currency",
       currency,
       currencyDisplay: "narrowSymbol",
       maximumFractionDigits: 2,
     });
+    return showCurrency ? `${formatted} ${currency}` : formatted;
   } catch {
     return `${currency} ${n.toFixed(2)}`;
   }
@@ -1053,13 +1063,13 @@ export default function App() {
                           {qty(h.quantity)}
                         </td>
                         <td className="px-3 py-2.5 tabular-nums">
-                          {money(h.avgCost, h.currency)}
+                          {money(h.avgCost, h.currency, true)}
                         </td>
                         <td className="px-3 py-2.5 tabular-nums">
-                          {money(h.marketPrice, h.currency)}
+                          {money(h.marketPrice, h.currency, true)}
                         </td>
                         <td className="px-3 py-2.5 tabular-nums">
-                          {money(h.marketValue, h.currency)}
+                          {money(h.marketValue, h.currency, true)}
                         </td>
                         <td className="px-3 py-2.5 tabular-nums">
                           {money(h.marketValueAud)}
@@ -1236,7 +1246,7 @@ export default function App() {
                         {qty(t.quantity)}
                       </td>
                       <td className="px-2 py-1 tabular-nums">
-                        {money(t.amount, t.currency)}
+                        {money(t.amount, t.currency, true)}
                       </td>
                     </tr>
                   ))}
