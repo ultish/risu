@@ -520,6 +520,10 @@ export default function App() {
     setFiles((prev) => prev.filter((i) => i.key !== key));
   }
 
+  function removeAllFiles() {
+    setFiles((prev) => prev.filter((i) => i.status === "importing"));
+  }
+
   function setItemParser(key: string, value: string) {
     setFiles((prev) =>
       prev.map((i) => {
@@ -1357,7 +1361,21 @@ export default function App() {
               </label>
 
               {files.length > 0 && (
-                <div className="mt-4 divide-y divide-gray-800 rounded-lg border border-gray-800">
+                <div className="mt-4 rounded-lg border border-gray-800">
+                  <div className="flex items-center justify-between border-b border-gray-800 px-3 py-1.5">
+                    <span className="text-xs text-gray-500">
+                      {files.length} file{files.length === 1 ? "" : "s"} queued
+                    </span>
+                    <button
+                      type="button"
+                      onClick={removeAllFiles}
+                      disabled={files.some((f) => f.status === "importing")}
+                      className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-red-300 disabled:opacity-40"
+                    >
+                      Remove all
+                    </button>
+                  </div>
+                  <div className="divide-y divide-gray-800">
                   {files.map((item) => (
                     <div
                       key={item.key}
@@ -1471,6 +1489,7 @@ export default function App() {
                       )}
                     </div>
                   ))}
+                  </div>
                 </div>
               )}
 
