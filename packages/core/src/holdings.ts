@@ -1,4 +1,5 @@
 import {
+  convertCurrency,
   defaultCurrencyForExchange,
   holdingPriceKey,
   toAud,
@@ -11,8 +12,10 @@ import type { Holding, ParsedTransaction } from "./types.js";
 
 /**
  * Market quotes are always in the exchange's quote currency (US→USD, ASX→AUD).
- * Ledger `currency` may be AUD for Sharesight "stored cost in AUD" — use that
- * for cost only; never treat a USD Yahoo close as AUD.
+ * Cost base is now always accumulated in this same canonical currency too
+ * (see computeHoldings) — a mismatched ledger `currency` (e.g. Sharesight's
+ * paste sometimes storing an already-FX-converted AUD figure for a USD
+ * trade) gets converted at accumulation time, not trusted at face value.
  */
 function quoteCurrencyForHolding(exchange: string, ledgerCurrency: string): string {
   const fromEx = defaultCurrencyForExchange(exchange);
@@ -44,7 +47,8 @@ export type HoldingsPriceMaps = {
 
 /**
  * Build current holdings from a chronological transaction ledger.
- * Cost base stays in trade currency; AUD fields use fxRates when available.
+ * Cost base is always accumulated in the ticker's exchange-canonical
+ * currency (see below); AUD fields use fxRates when available.
  */
 export function computeHoldings(
   transactions: ParsedTransaction[],
@@ -54,6 +58,7 @@ export function computeHoldings(
     "prices" in marketPrices && marketPrices.prices
       ? (marketPrices as HoldingsPriceMaps)
       : { prices: marketPrices as Record<string, number | null> };
+  const fx = maps.fxRates ?? {};
 
   const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
   const map = new Map<
@@ -72,19 +77,26 @@ export function computeHoldings(
 
   for (const tx of sorted) {
     const exchange = (tx.exchange || "ASX").toUpperCase();
-    const currency = (
+    const txCurrency = (
       tx.currency || defaultCurrencyForExchange(exchange)
     ).toUpperCase();
     const key = keyOf({ ...tx, exchange });
+    // A stock trades in one currency for its whole history, determined by
+    // its exchange (US→USD, ASX→AUD, …) — not by which import source
+    // happened to record a given trade. Sharesight's paste mechanism, for
+    // one, sometimes stores an already-FX-converted AUD figure for a
+    // USD-exchange trade. Treat the exchange-implied currency as canonical
+    // and convert any mismatched transaction's dollar amount into it before
+    // accumulating cost base, so mixed-source imports for the same ticker
+    // never silently blend two currencies together.
+    const canonicalCurrency = defaultCurrencyForExchange(exchange);
     const cur = map.get(key) ?? {
       ticker: tx.ticker.toUpperCase(),
       exchange,
-      currency,
+      currency: canonicalCurrency,
       quantity: 0,
       costBase: 0,
     };
-    // Prefer first non-empty currency on the book
-    if (!cur.currency) cur.currency = currency;
 
     switch (tx.type) {
       case "buy":
@@ -95,10 +107,15 @@ export function computeHoldings(
           (tx.amount != null && tx.quantity !== 0
             ? tx.amount / tx.quantity
             : 0);
-        const costAdd =
+        const costAddNative =
           tx.amount != null
             ? tx.amount + (tx.brokerage || 0)
             : unitCost * tx.quantity + (tx.brokerage || 0);
+        const costAdd =
+          txCurrency === cur.currency
+            ? costAddNative
+            : (convertCurrency(costAddNative, txCurrency, cur.currency, fx) ??
+              costAddNative);
         cur.quantity += tx.quantity;
         cur.costBase += costAdd;
         break;
@@ -128,7 +145,6 @@ export function computeHoldings(
     map.set(key, cur);
   }
 
-  const fx = maps.fxRates ?? {};
   const holdings: Holding[] = [];
 
   for (const h of map.values()) {
@@ -166,7 +182,7 @@ export function computeHoldings(
       fxRate = fx[pair] ?? fx[quoteCcy] ?? null;
     }
 
-    // Cost: ledger currency (often AUD from Sharesight). Value: quote currency.
+    // Cost and quote currency are now always the same canonical currency.
     const costBaseAud = toAud(h.costBase, costCcy, fx);
     const marketValueAud =
       marketValue != null ? toAud(marketValue, quoteCcy, fx) : null;

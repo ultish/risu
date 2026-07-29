@@ -112,6 +112,30 @@ export function toAud(
   return amount / rate;
 }
 
+/**
+ * Convert an amount between two currencies via AUD as pivot (same Yahoo-style
+ * fxRates map `toAud` uses). Returns null only if a needed rate is missing —
+ * callers should fall back to the unconverted amount rather than drop data.
+ */
+export function convertCurrency(
+  amount: number,
+  fromCurrency: string,
+  toCurrency: string,
+  fxRates: Record<string, number | null | undefined>,
+): number | null {
+  const from = fromCurrency.toUpperCase();
+  const to = toCurrency.toUpperCase();
+  if (from === to) return amount;
+  const aud = toAud(amount, from, fxRates);
+  if (aud == null) return null;
+  if (to === "AUD") return aud;
+  const pair = fxYahooSymbol(to);
+  if (!pair) return null;
+  const rate = fxRates[pair] ?? fxRates[to];
+  if (rate == null || rate === 0) return null;
+  return aud * rate;
+}
+
 export function holdingPriceKey(exchange: string, ticker: string): string {
   return `${exchange.toUpperCase()}:${ticker.toUpperCase()}`;
 }
