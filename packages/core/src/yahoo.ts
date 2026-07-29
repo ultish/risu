@@ -11,6 +11,19 @@ const YAHOO_SPARK_Q2 = "https://query2.finance.yahoo.com/v8/finance/spark";
 /** Prefer bulk multi-symbol calls; keep chunks small when IP is fragile. */
 export const YAHOO_BULK_CHUNK = 20;
 
+/**
+ * Yahoo's unofficial APIs block plain HTTP clients (curl / Node fetch) at
+ * the TLS/handshake level even with browser-identical headers, while a real
+ * browser request succeeds. Callers (apps/api) can swap this default for a
+ * real-browser-backed fetch (see apps/api/src/yahooBrowserFetch.ts) so every
+ * Yahoo call below goes through it without threading fetchImpl everywhere.
+ */
+let yahooDefaultFetch: typeof fetch = fetch;
+
+export function setYahooFetchImpl(impl: typeof fetch) {
+  yahooDefaultFetch = impl;
+}
+
 /** Browser-like headers — Yahoo often 401s scrapers / bare clients. */
 const YAHOO_HEADERS: Record<string, string> = {
   "User-Agent":
@@ -52,8 +65,11 @@ async function ensureYahooSession(
     return yahooSession;
   }
 
+  // 1) Best-effort cookie seed (A1 / A3 etc.). A browser-backed fetchImpl
+  // already carries cookies in its own jar regardless of whether this call
+  // succeeds, so failure here shouldn't abort session setup.
+  let cookie = "";
   try {
-    // 1) Seed cookies (A1 / A3 etc.)
     const fc = await fetchImpl("https://fc.yahoo.com", {
       headers: YAHOO_HEADERS,
       redirect: "manual",
@@ -74,19 +90,19 @@ async function ensureYahooSession(
         }
       }
     }
-    const cookie = cookies.join("; ");
-    if (!cookie) {
-      yahooSession = null;
-      return null;
-    }
+    cookie = cookies.join("; ");
+  } catch {
+    /* best-effort; fall through to crumb fetch regardless */
+  }
 
+  try {
     // 2) Crumb for quote API
     const crumbRes = await fetchImpl(
       "https://query2.finance.yahoo.com/v1/test/getcrumb",
       {
         headers: {
           ...YAHOO_HEADERS,
-          Cookie: cookie,
+          ...(cookie ? { Cookie: cookie } : {}),
         },
       },
     );
@@ -668,7 +684,7 @@ export async function fetchYahooQuotesBulk(
   symbols: string[],
   options: { fetchImpl?: typeof fetch; chunkSize?: number } = {},
 ): Promise<Map<string, YahooQuoteSnapshot>> {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? yahooDefaultFetch;
   const out = new Map<string, YahooQuoteSnapshot>();
   const chunks = chunkSymbols(symbols, options.chunkSize ?? YAHOO_BULK_CHUNK);
   if (!chunks.length) return out;
@@ -713,7 +729,7 @@ export async function fetchYahooSparkHistoryBulk(
     chunkSize?: number;
   } = {},
 ): Promise<Map<string, PriceBar[]>> {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? yahooDefaultFetch;
   const range = options.range ?? "1y";
   const out = new Map<string, PriceBar[]>();
   const chunks = chunkSymbols(symbols, options.chunkSize ?? YAHOO_BULK_CHUNK);
@@ -756,7 +772,7 @@ export async function fetchYahooHistory(
     fetchImpl?: typeof fetch;
   } = {},
 ): Promise<PriceBar[]> {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? yahooDefaultFetch;
   const symbol = toYahooSymbol(ticker, options.exchange ?? "ASX");
   const period2 = options.period2 ?? new Date();
   const period1 =
@@ -844,7 +860,7 @@ export async function fetchYahooDividends(
     fetchImpl?: typeof fetch;
   } = {},
 ): Promise<DividendEvent[]> {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = options.fetchImpl ?? yahooDefaultFetch;
   const symbol = toYahooSymbol(ticker, options.exchange ?? "ASX");
   const period2 = options.period2 ?? new Date();
   const period1 =

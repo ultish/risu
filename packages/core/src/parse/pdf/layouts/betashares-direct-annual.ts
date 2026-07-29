@@ -66,6 +66,8 @@ export function parseBetasharesDirectAnnualText(
 
   let depositCount = 0;
   let depositTotal = 0;
+  let feeCount = 0;
+  let feeTotal = 0;
 
   LINE_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
@@ -90,6 +92,10 @@ export function parseBetasharesDirectAnnualText(
     }
 
     if (kind === "Fees") {
+      // Auto-pilot fees aren't tied to any instrument — importing them as a
+      // "FEE" ticker made them show up as a phantom holding needing a price
+      // quote (which always fails, since it's not a real security). Skip
+      // them like deposits and surface the total instead.
       const feeMatch = FEE_RE.exec(body);
       const feeAmount = feeMatch ? num(feeMatch[1]) : null;
       if (feeAmount == null) {
@@ -99,23 +105,8 @@ export function parseBetasharesDirectAnnualText(
         });
         continue;
       }
-      const amountAbs = Math.abs(feeAmount);
-      const notes = feeMatch
-        ? body.slice(0, feeMatch.index + feeMatch[0].length).trim()
-        : "Betashares Direct fee";
-      transactions.push({
-        date: iso,
-        ticker: "FEE",
-        exchange: "ASX",
-        type: "fee",
-        quantity: 0,
-        price: null,
-        amount: amountAbs,
-        brokerage: 0,
-        currency: "AUD",
-        externalId: `bsd-${iso}-fee-FEE-0-${amountAbs}`,
-        notes: notes || "Betashares Direct fee",
-      });
+      feeCount += 1;
+      feeTotal += Math.abs(feeAmount);
       continue;
     }
 
@@ -186,6 +177,13 @@ export function parseBetasharesDirectAnnualText(
   if (depositCount > 0) {
     warnings.push({
       message: `Skipped ${depositCount} deposit line(s) totalling $${depositTotal.toFixed(2)} — cash deposits are not ledger transactions`,
+      severity: "info",
+    });
+  }
+
+  if (feeCount > 0) {
+    warnings.push({
+      message: `Skipped ${feeCount} auto-pilot fee line(s) totalling $${feeTotal.toFixed(2)} — not tied to any instrument, not a ledger transaction`,
       severity: "info",
     });
   }

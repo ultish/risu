@@ -25,6 +25,8 @@ export function registerPerformanceRoutes(
       portfolioId?: number;
       broker?: string;
       source?: string;
+      ticker?: string;
+      exchange?: string;
     }) => ParsedTransaction[];
   },
 ) {
@@ -32,11 +34,15 @@ export function registerPerformanceRoutes(
     const portfolioId = c.req.query("portfolioId") || c.req.query("accountId");
     const broker = c.req.query("broker") || undefined;
     const source = c.req.query("source") || undefined;
+    const ticker = c.req.query("ticker") || undefined;
+    const exchange = c.req.query("exchange") || undefined;
 
     const txs = deps.loadTransactions({
       portfolioId: portfolioId ? Number(portfolioId) : undefined,
       broker,
       source,
+      ticker,
+      exchange,
     });
 
     const priceSeries = loadPriceSeries(deps.db);

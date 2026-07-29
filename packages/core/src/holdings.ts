@@ -45,6 +45,64 @@ export type HoldingsPriceMaps = {
   splitEvents?: SplitEvent[];
 };
 
+/** Settlement lands at most this many days after the trade that caused it. */
+const TRANSFER_DUPLICATE_WINDOW_DAYS = 5;
+
+function daysBetween(fromIso: string, toIso: string): number {
+  return Math.round(
+    (new Date(toIso).getTime() - new Date(fromIso).getTime()) /
+      (1000 * 60 * 60 * 24),
+  );
+}
+
+/**
+ * Issuer registry annual statements (Computershare, Link/MUFG) report every
+ * CHESS settlement as a `transfer_in`/`transfer_out` row — the registry has
+ * no way to know the same settlement was already recorded as a `buy`/`sell`
+ * from the actual broker import (e.g. a Pocket CSV). When a transfer's
+ * quantity is *exactly* explained by nearby buy/sell quantity for the same
+ * instrument (settlement typically lands T+2, so within a few days of the
+ * trade), it's that duplicate, not a genuine external transfer — drop it
+ * before accumulating holdings/cost base.
+ *
+ * Only an exact quantity match is dropped; a partial/ambiguous match is left
+ * alone rather than guessed at (docs §15.3 "warn > silent drop" — silently
+ * discarding a real transfer would be far worse than leaving a rare
+ * unresolved double-count visible).
+ */
+function dropDuplicateTransfers(
+  transactions: ParsedTransaction[],
+): ParsedTransaction[] {
+  const byKey = new Map<string, ParsedTransaction[]>();
+  for (const tx of transactions) {
+    const key = holdingPriceKey(tx.exchange || "ASX", tx.ticker);
+    const list = byKey.get(key);
+    if (list) list.push(tx);
+    else byKey.set(key, [tx]);
+  }
+
+  const drop = new Set<ParsedTransaction>();
+  for (const list of byKey.values()) {
+    for (const t of list) {
+      if (t.type !== "transfer_in" && t.type !== "transfer_out") continue;
+      const wantType = t.type === "transfer_in" ? "buy" : "sell";
+      const nearbySum = list
+        .filter(
+          (o) =>
+            o.type === wantType &&
+            o.date <= t.date &&
+            daysBetween(o.date, t.date) <= TRANSFER_DUPLICATE_WINDOW_DAYS,
+        )
+        .reduce((sum, o) => sum + o.quantity, 0);
+      if (nearbySum > 0 && Math.abs(nearbySum - t.quantity) < 1e-9) {
+        drop.add(t);
+      }
+    }
+  }
+
+  return drop.size ? transactions.filter((t) => !drop.has(t)) : transactions;
+}
+
 /**
  * Build current holdings from a chronological transaction ledger.
  * Cost base is always accumulated in the ticker's exchange-canonical
@@ -60,7 +118,9 @@ export function computeHoldings(
       : { prices: marketPrices as Record<string, number | null> };
   const fx = maps.fxRates ?? {};
 
-  const sorted = [...transactions].sort((a, b) => a.date.localeCompare(b.date));
+  const sorted = [...dropDuplicateTransfers(transactions)].sort((a, b) =>
+    a.date.localeCompare(b.date),
+  );
   const map = new Map<
     string,
     {

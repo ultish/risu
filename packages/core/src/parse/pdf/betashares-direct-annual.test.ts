@@ -41,7 +41,7 @@ describe("betashares_direct.platform_annual — parse", () => {
     const result = parseBetasharesDirectAnnualText(text, "sample.pdf");
 
     expect(result.broker).toBe("betashares_direct");
-    expect(result.transactions).toHaveLength(7);
+    expect(result.transactions).toHaveLength(5);
 
     const buys = result.transactions.filter((t) => t.type === "buy");
     const sells = result.transactions.filter((t) => t.type === "sell");
@@ -51,7 +51,7 @@ describe("betashares_direct.platform_annual — parse", () => {
     );
     expect(buys).toHaveLength(3);
     expect(sells).toHaveLength(1);
-    expect(fees).toHaveLength(2);
+    expect(fees).toHaveLength(0);
     expect(dividends).toHaveLength(1);
 
     const ndqBuy = buys.find(
@@ -80,16 +80,14 @@ describe("betashares_direct.platform_annual — parse", () => {
       externalId: "bsd-2025-09-15-sell-BGBL-1-55",
     });
 
-    // Locked decision (docs/import-layouts-plan.md Appendix C.4): fees import
-    // as ticker FEE / ASX / type fee / quantity 0.
-    for (const fee of fees) {
-      expect(fee.ticker).toBe("FEE");
-      expect(fee.exchange).toBe("ASX");
-      expect(fee.quantity).toBe(0);
-      expect(fee.price).toBeNull();
-      expect(fee.amount).toBeCloseTo(3);
-    }
-    expect(fees[0]!.externalId).toBe("bsd-2025-10-01-fee-FEE-0-3");
+    // Fees aren't tied to any instrument (docs/import-layouts-plan.md
+    // Appendix C.4, revised): skip them like deposits rather than importing
+    // a synthetic "FEE" ticker, which showed up as a phantom holding.
+    expect(
+      result.warnings.some(
+        (w) => w.severity === "info" && /auto-pilot fee/i.test(w.message),
+      ),
+    ).toBe(true);
 
     const dist = dividends[0]!;
     expect(dist).toMatchObject({

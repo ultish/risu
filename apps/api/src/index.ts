@@ -26,6 +26,7 @@ import {
   resolveInstrumentAssumptions,
   resolveInstrumentFromSeed,
   runScenario,
+  setYahooFetchImpl,
   summarizeDividendIncome,
   toYahooSymbol,
   type BrokerId,
@@ -42,6 +43,7 @@ import { getDbPath, openDb } from "./db.js";
 import { registerExportRoutes } from "./routes/export.js";
 import { registerPerformanceRoutes } from "./routes/performance.js";
 import { registerReconcileRoutes } from "./routes/reconcile.js";
+import { closeYahooBrowser, yahooBrowserFetch } from "./yahooBrowserFetch.js";
 import {
   assertYahooAllowed,
   clearYahooCooldown,
@@ -50,6 +52,11 @@ import {
   recordYahooRefreshStarted,
   recordYahooSuccess,
 } from "./yahooGate.js";
+
+// Yahoo blocks plain Node/curl HTTP clients at the TLS level even with
+// browser-identical headers; route every Yahoo call through a real headless
+// Chromium instance instead. See yahooBrowserFetch.ts for details.
+setYahooFetchImpl(yahooBrowserFetch);
 
 const db = openDb();
 const app = new Hono();
@@ -192,6 +199,8 @@ function loadTransactions(filters: {
   portfolioId?: number;
   broker?: string;
   source?: string;
+  ticker?: string;
+  exchange?: string;
 }): ParsedTransaction[] {
   let sql = "SELECT * FROM transactions WHERE 1=1";
   const params: unknown[] = [];
@@ -206,6 +215,14 @@ function loadTransactions(filters: {
   if (filters.source) {
     sql += " AND source = ?";
     params.push(filters.source);
+  }
+  if (filters.ticker) {
+    sql += " AND ticker = ?";
+    params.push(filters.ticker.toUpperCase());
+  }
+  if (filters.exchange) {
+    sql += " AND exchange = ?";
+    params.push(filters.exchange.toUpperCase());
   }
   sql += " ORDER BY date ASC, id ASC";
   const rows = db.prepare(sql).all(...params) as Array<{
@@ -457,10 +474,40 @@ app.patch("/api/transactions/:id", async (c) => {
   return c.json(db.prepare("SELECT * FROM transactions WHERE id = ?").get(id));
 });
 
+/**
+ * Purge price_cache/quote_cache rows for tickers that no longer have any
+ * transactions — those caches are keyed independently by symbol with no FK
+ * to transactions, so plain DELETEs leave them behind as inert clutter
+ * (harmless for correctness — holdings are computed purely from
+ * `transactions` — but pointless to keep once nothing references them).
+ */
+function purgeOrphanedPriceCache(tickers: Array<{ ticker: string; exchange: string }>) {
+  const seen = new Set<string>();
+  const delPrice = db.prepare("DELETE FROM price_cache WHERE symbol = ?");
+  const delQuote = db.prepare("DELETE FROM quote_cache WHERE symbol = ?");
+  const stillHeld = db.prepare(
+    "SELECT COUNT(*) AS c FROM transactions WHERE ticker = ? AND exchange = ?",
+  );
+  for (const { ticker, exchange } of tickers) {
+    const key = `${exchange}:${ticker}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const remaining = stillHeld.get(ticker, exchange) as { c: number };
+    if (remaining.c > 0) continue;
+    const symbol = toYahooSymbol(ticker, exchange);
+    delPrice.run(symbol);
+    delQuote.run(symbol);
+  }
+}
+
 app.delete("/api/transactions/:id", (c) => {
   const id = Number(c.req.param("id"));
+  const row = db
+    .prepare("SELECT ticker, exchange FROM transactions WHERE id = ?")
+    .get(id) as { ticker: string; exchange: string } | undefined;
   const info = db.prepare("DELETE FROM transactions WHERE id = ?").run(id);
   if (info.changes === 0) return c.json({ error: "not found" }, 404);
+  if (row) purgeOrphanedPriceCache([row]);
   return c.json({ ok: true, id });
 });
 
@@ -469,6 +516,11 @@ app.post("/api/transactions/delete", async (c) => {
   const body = await c.req.json<{ ids?: number[] }>();
   const ids = (body.ids ?? []).map(Number).filter((n) => !Number.isNaN(n));
   if (!ids.length) return c.json({ error: "ids required" }, 400);
+  const affected = db
+    .prepare(
+      `SELECT DISTINCT ticker, exchange FROM transactions WHERE id IN (${ids.map(() => "?").join(",")})`,
+    )
+    .all(...ids) as Array<{ ticker: string; exchange: string }>;
   const del = db.prepare("DELETE FROM transactions WHERE id = ?");
   const run = db.transaction((list: number[]) => {
     let n = 0;
@@ -476,6 +528,7 @@ app.post("/api/transactions/delete", async (c) => {
     return n;
   });
   const deleted = run(ids);
+  purgeOrphanedPriceCache(affected);
   return c.json({ ok: true, deleted });
 });
 
@@ -867,7 +920,13 @@ app.post("/api/import", async (c) => {
     );
   }
 
-  const source = sourceOverride || `file:${parsed.broker}`;
+  // Prefer the detected PDF/XLSX layout id over `broker` for the displayed
+  // source: registry statement layouts (Computershare, Link/MUFG) always
+  // report broker "generic" since custody genuinely can't be inferred from
+  // an issuer statement — but the layout itself (e.g.
+  // "link_mufg.issuer_etf_annual") is known and far more informative than
+  // "generic" in the source filter.
+  const source = sourceOverride || `file:${parsed.layoutId || parsed.broker}`;
   const broker = custodyBroker || inferCustodyFromParser(parsed.broker);
 
   const insertBatch = db.prepare(
@@ -1154,8 +1213,12 @@ app.post("/api/prices/refresh", async (c) => {
 
   let instruments = body.instruments;
   if (!instruments?.length) {
+    // type = "fee" rows carry a synthetic ticker ("FEE") for account-level
+    // charges that aren't tied to any instrument — not a real security to price.
     instruments = db
-      .prepare("SELECT DISTINCT ticker, exchange FROM transactions")
+      .prepare(
+        "SELECT DISTINCT ticker, exchange FROM transactions WHERE type != 'fee'",
+      )
       .all() as Array<{ ticker: string; exchange: string }>;
   }
 
@@ -1330,7 +1393,7 @@ app.post("/api/prices/refresh", async (c) => {
     }
   }
 
-  // ── Optional Yahoo 1y history (performance chart → price_cache) ──
+  // ── Optional Yahoo 10y history (performance chart → price_cache) ──
   // Spark bulk first; chart API per symbol for any gaps (chart is often less blocked).
   let historyMap = new Map<
     string,
@@ -1349,7 +1412,7 @@ app.post("/api/prices/refresh", async (c) => {
     if (!yahooCircuitOpen) {
       try {
         historyMap = await fetchYahooSparkHistoryBulk(equitySymbols, {
-          range: "1y",
+          range: "10y",
         });
         if (historyMap.size) {
           anyLiveSuccess = true;
@@ -1371,7 +1434,7 @@ app.post("/api/prices/refresh", async (c) => {
     });
     const batchSize = 4;
     const period2 = new Date();
-    const period1 = new Date(period2.getTime() - 1000 * 60 * 60 * 24 * 365);
+    const period1 = new Date(period2.getTime() - 1000 * 60 * 60 * 24 * 365 * 10);
     let chartStopped = false;
     for (let i = 0; i < needChart.length && !chartStopped; i += batchSize) {
       const batch = needChart.slice(i, i + batchSize);
@@ -1588,7 +1651,7 @@ app.post("/api/prices/refresh", async (c) => {
             : " (Yahoo cool-down — fallbacks). Re-open Holdings to refresh the chart.") +
           " Open yahooBrowserUrls.spark in a browser and paste JSON via Settings / risu.importYahoo."
         : `Refreshed ${okCount}/${results.length} via ${srcLabel}` +
-          (includeHistory ? " + 1y Yahoo history" : ""),
+          (includeHistory ? " + 10y Yahoo history" : ""),
   });
 });
 
@@ -2337,6 +2400,12 @@ if (serveWeb && webDistAbs) {
 const port = Number(process.env.PORT ?? 8787);
 console.log(`yields api listening on http://localhost:${port}`);
 serve({ fetch: app.fetch, port });
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => {
+    closeYahooBrowser().finally(() => process.exit(0));
+  });
+}
 
 function inferCustodyFromParser(parser: string): string | null {
   if (parser === "sharesight" || parser === "generic") return null;

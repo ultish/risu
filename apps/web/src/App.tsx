@@ -28,11 +28,13 @@ import PerformanceChart from "./PerformanceChart";
 import { PlannerPanel } from "./PlannerPanel";
 import { SettingsPanel } from "./SettingsPanel";
 import { TaxSettingsPanel } from "./TaxSettingsPanel";
+import { TickerPanel } from "./TickerPanel";
 
 /** Top-level nav — synced to `?tab=` for copyable links */
 const MAIN_TABS = [
   "holdings",
   "transactions",
+  "ticker",
   "import",
   "tax",
   "planner",
@@ -211,7 +213,7 @@ const TX_TYPES = [
  * — skip it for values already in a currency-labelled context (e.g. the
  * "Cost base (AUD)" stat cards, or *Aud fields), where it'd be redundant.
  */
-function money(
+export function money(
   n: number | null | undefined,
   currency = "AUD",
   showCurrency = false,
@@ -233,7 +235,7 @@ function money(
   }
 }
 
-function qty(n: number) {
+export function qty(n: number) {
   return n.toLocaleString("en-AU", { maximumFractionDigits: 6 });
 }
 
@@ -472,12 +474,19 @@ export default function App() {
     );
   }
 
-  function openHoldingTrades(h: Holding) {
+  function openTickerPage(h: Holding) {
     setTickerFilter(h.ticker);
     setExchangeFilter(h.exchange);
-    setTab("transactions");
-    setTxScrollTop(0);
+    setTab("ticker");
   }
+
+  const selectedHolding = useMemo(
+    () =>
+      holdings.find(
+        (h) => h.ticker === tickerFilter && h.exchange === exchangeFilter,
+      ),
+    [holdings, tickerFilter, exchangeFilter],
+  );
 
   useEffect(() => {
     void load();
@@ -1025,7 +1034,7 @@ export default function App() {
         <div className="space-y-4">
           <Panel title={`Holdings · ${selectedPortfolioLabel}`}>
             <p className="mb-3 text-xs text-gray-500">
-              Click a row to open that ticker’s transactions.
+              Click a row to open that ticker’s page.
             </p>
             {holdings.length === 0 ? (
               <Empty hint="Import or paste trades into a portfolio." />
@@ -1048,7 +1057,7 @@ export default function App() {
                       <tr
                         key={`${h.exchange}:${h.ticker}`}
                         className="cursor-pointer border-t border-gray-800/80 hover:bg-emerald-500/10"
-                        onClick={() => openHoldingTrades(h)}
+                        onClick={() => openTickerPage(h)}
                       >
                         <td className="px-3 py-2.5 font-medium text-emerald-300">
                           {h.ticker}
@@ -1087,6 +1096,26 @@ export default function App() {
           />
         </div>
       )}
+
+      {tab === "ticker" &&
+        (tickerFilter ? (
+          <TickerPanel
+            ticker={tickerFilter}
+            exchange={exchangeFilter}
+            holding={selectedHolding}
+            filters={filters}
+            reloadToken={pricesReloadToken}
+            onBack={() => setTab("holdings")}
+            onViewLedger={() => {
+              setTab("transactions");
+              setTxScrollTop(0);
+            }}
+          />
+        ) : (
+          <Panel title="No ticker selected">
+            <Empty hint="Open a ticker page by clicking a row on Holdings." />
+          </Panel>
+        ))}
 
       {tab === "transactions" && (
         <Panel
@@ -1344,6 +1373,52 @@ export default function App() {
                 annual statement PDFs. Custody defaults to Auto too — set it
                 per file if an issuer statement needs a specific broker.
               </p>
+
+              <details className="mt-2 rounded-lg border border-gray-800 bg-gray-900/50 px-3 py-2 text-xs text-gray-400">
+                <summary className="cursor-pointer select-none text-gray-300 hover:text-gray-100">
+                  Where do I get this file?
+                </summary>
+                <ul className="mt-2 space-y-1.5">
+                  <li>
+                    <strong className="text-gray-200">CommSec</strong> —{" "}
+                    <em>Confirmations CSV</em>, not the account/transactions
+                    statement export (that one has explicit Security/B-S/
+                    Units/Net Proceeds columns and isn't the plain cash
+                    ledger).
+                  </li>
+                  <li>
+                    <strong className="text-gray-200">Selfwealth</strong> —
+                    Report CSV.
+                  </li>
+                  <li>
+                    <strong className="text-gray-200">Stake</strong> — web:
+                    Profile → Tax &amp; reporting → Financial year reports;
+                    app: More → Tax &amp; Documents. Download{" "}
+                    <em>Investment activity</em> as XLSX per financial year
+                    (not PDF).
+                  </li>
+                  <li>
+                    <strong className="text-gray-200">Sharesight</strong> —
+                    Tax tab → All Trades Report → Export → Spreadsheet. Needs
+                    a paid plan; on Free, use the per-holding "All trades
+                    &amp; adjustments" copy/paste tab instead.
+                  </li>
+                  <li>
+                    <strong className="text-gray-200">
+                      Betashares Direct
+                    </strong>{" "}
+                    — Annual Statement PDF (Tax &amp; Documents / app).
+                  </li>
+                  <li>
+                    <strong className="text-gray-200">
+                      Computershare (VGS, IOZ, …)
+                    </strong>{" "}
+                    / <strong className="text-gray-200">Link/MUFG (NDQ, …)</strong>{" "}
+                    — issuer Annual Statement PDF; custody isn't
+                    auto-assigned, set it per file.
+                  </li>
+                </ul>
+              </details>
 
               <label
                 onDrop={onDrop}
@@ -2054,7 +2129,7 @@ function SubNav<T extends string>({
   );
 }
 
-function Panel({
+export function Panel({
   title,
   children,
 }: {
@@ -2069,7 +2144,7 @@ function Panel({
   );
 }
 
-function Empty({ hint }: { hint: string }) {
+export function Empty({ hint }: { hint: string }) {
   return <p className="text-sm text-gray-500">{hint}</p>;
 }
 
@@ -2331,7 +2406,7 @@ function ReconcileTable({
   );
 }
 
-function ExchangeBadge({
+export function ExchangeBadge({
   exchange,
   currency,
 }: {
@@ -2354,7 +2429,7 @@ function ExchangeBadge({
   );
 }
 
-function TypeBadge({ type }: { type: string }) {
+export function TypeBadge({ type }: { type: string }) {
   const styles: Record<string, string> = {
     buy: "bg-sky-500/15 text-sky-300",
     sell: "bg-orange-500/15 text-orange-300",

@@ -239,7 +239,7 @@ export async function fetchQuotesMulti(
     try {
       const bulk = await fetchYahooQuotesBulk(
         meta.map((m) => m.symbol),
-        { fetchImpl },
+        { fetchImpl: options.fetchImpl },
       );
       for (const [sym, snap] of bulk) {
         quotes.set(sym, { ...snap, source: "yahoo" });
@@ -407,7 +407,7 @@ export async function fetchFxHistory(
         exchange: "FX",
         period1,
         period2,
-        fetchImpl,
+        fetchImpl: options.fetchImpl,
       });
       const points = bars
         .filter((b) => b.close != null && b.close > 0 && !Number.isNaN(b.close))
@@ -494,7 +494,9 @@ export async function fetchFxMulti(
 
   if (tryYahoo && pairs.length) {
     try {
-      const bulk = await fetchYahooQuotesBulk(pairs, { fetchImpl });
+      const bulk = await fetchYahooQuotesBulk(pairs, {
+        fetchImpl: options.fetchImpl,
+      });
       for (const [sym, snap] of bulk) {
         rates.set(sym, {
           pair: sym,

@@ -133,3 +133,142 @@ describe("computeHoldings currency handling", () => {
     expect(tsla.costBase).toBeCloseTo(100, 2);
   });
 });
+
+describe("computeHoldings transfer_in/out duplicate detection", () => {
+  // Real bug: issuer registry annual statements (Computershare, Link/MUFG)
+  // report every CHESS settlement as transfer_in/out with no idea the same
+  // settlement was already imported as a buy/sell from the broker CSV —
+  // doubling the holding. Settlement lands ~T+2 after the trade.
+  it("drops a transfer_in that exactly matches a single nearby buy", () => {
+    const holdings = computeHoldings([
+      tx({
+        date: "2023-12-12",
+        ticker: "NDQ",
+        exchange: "ASX",
+        type: "buy",
+        quantity: 5,
+        amount: 189.38,
+        currency: "AUD",
+      }),
+      tx({
+        date: "2023-12-14",
+        ticker: "NDQ",
+        exchange: "ASX",
+        type: "transfer_in",
+        quantity: 5,
+        currency: "AUD",
+      }),
+    ]);
+    const ndq = holdings.find((h) => h.ticker === "NDQ")!;
+    expect(ndq.quantity).toBeCloseTo(5, 6);
+    expect(ndq.costBase).toBeCloseTo(189.38, 2);
+  });
+
+  it("drops a transfer_in that exactly matches the SUM of nearby buys (split across broker orders)", () => {
+    const holdings = computeHoldings([
+      tx({
+        date: "2023-12-11",
+        ticker: "IOZ",
+        exchange: "ASX",
+        type: "buy",
+        quantity: 6,
+        amount: 176.75,
+        currency: "AUD",
+      }),
+      tx({
+        date: "2023-12-11",
+        ticker: "IOZ",
+        exchange: "ASX",
+        type: "buy",
+        quantity: 2,
+        amount: 60.2,
+        currency: "AUD",
+      }),
+      tx({
+        date: "2023-12-13",
+        ticker: "IOZ",
+        exchange: "ASX",
+        type: "transfer_in",
+        quantity: 8,
+        currency: "AUD",
+      }),
+    ]);
+    const ioz = holdings.find((h) => h.ticker === "IOZ")!;
+    expect(ioz.quantity).toBeCloseTo(8, 6);
+    expect(ioz.costBase).toBeCloseTo(176.75 + 60.2, 2);
+  });
+
+  it("keeps a transfer_in with no matching nearby buy (genuine external transfer / opening balance)", () => {
+    const holdings = computeHoldings([
+      tx({
+        date: "2020-01-01",
+        ticker: "VAS",
+        exchange: "ASX",
+        type: "transfer_in",
+        quantity: 50,
+        currency: "AUD",
+      }),
+    ]);
+    const vas = holdings.find((h) => h.ticker === "VAS")!;
+    expect(vas.quantity).toBeCloseTo(50, 6);
+  });
+
+  it("keeps a transfer_in outside the settlement window even if quantity matches", () => {
+    const holdings = computeHoldings([
+      tx({
+        date: "2023-01-01",
+        ticker: "VGS",
+        exchange: "ASX",
+        type: "buy",
+        quantity: 10,
+        amount: 500,
+        currency: "AUD",
+      }),
+      tx({
+        date: "2023-06-01", // months later, not a settlement of the January buy
+        ticker: "VGS",
+        exchange: "ASX",
+        type: "transfer_in",
+        quantity: 10,
+        currency: "AUD",
+      }),
+    ]);
+    const vgs = holdings.find((h) => h.ticker === "VGS")!;
+    // Both counted: 10 (buy) + 10 (unexplained transfer) = 20
+    expect(vgs.quantity).toBeCloseTo(20, 6);
+  });
+
+  it("drops a transfer_out that exactly matches a nearby sell (symmetric case)", () => {
+    const holdings = computeHoldings([
+      tx({
+        date: "2024-01-01",
+        ticker: "BHP",
+        exchange: "ASX",
+        type: "buy",
+        quantity: 20,
+        amount: 800,
+        currency: "AUD",
+      }),
+      tx({
+        date: "2024-06-01",
+        ticker: "BHP",
+        exchange: "ASX",
+        type: "sell",
+        quantity: 5,
+        amount: 250,
+        currency: "AUD",
+      }),
+      tx({
+        date: "2024-06-03",
+        ticker: "BHP",
+        exchange: "ASX",
+        type: "transfer_out",
+        quantity: 5,
+        currency: "AUD",
+      }),
+    ]);
+    const bhp = holdings.find((h) => h.ticker === "BHP")!;
+    // Only the real sell's 5 units come off — the duplicate transfer_out is dropped
+    expect(bhp.quantity).toBeCloseTo(15, 6);
+  });
+});
