@@ -208,9 +208,14 @@ const TX_TYPES = [
 function money(n: number | null | undefined, currency = "AUD") {
   if (n == null || Number.isNaN(n)) return "—";
   try {
+    // narrowSymbol: en-AU's default "symbol" display renders non-local
+    // currencies as a bare code (e.g. "USD 400.00") instead of "$400.00" —
+    // narrowSymbol keeps a consistent "$" regardless of currency (the Mkt/
+    // exchange badge next to each row already disambiguates AUD vs USD).
     return n.toLocaleString("en-AU", {
       style: "currency",
       currency,
+      currencyDisplay: "narrowSymbol",
       maximumFractionDigits: 2,
     });
   } catch {
@@ -1830,7 +1835,7 @@ export default function App() {
           width: 100%;
           border-radius: 0.5rem;
           border: 1px solid #374151;
-          background: #111827;
+          background-color: #111827;
           padding: 0.5rem 0.75rem;
           font-size: 0.875rem;
           color: #f3f4f6;

@@ -88,7 +88,11 @@ export function parseStakeRows(rows: Record<string, unknown>[]): ParseResult {
       parseNumber(getField(row, "fees", "fee", "brokerage", "commission")) ?? 0;
     const gst = parseNumber(getField(row, "gst")) ?? 0;
     const brokerage = Math.abs(fees) + Math.abs(gst);
-    // Prefer "Value" (pre-fee) over "Total Value" when both exist
+    // Prefer "Value" (pre-fee) over "Total Value" when both exist. Stake's
+    // own export signs this negative for sells (positive for buys) — every
+    // other parser in this codebase (CommSec, Sharesight, the PDF layouts)
+    // stores amount as an unsigned transaction size with `type` carrying the
+    // direction, so normalise here for consistency.
     let amount = parseNumber(
       getField(
         row,
@@ -100,6 +104,7 @@ export function parseStakeRows(rows: Record<string, unknown>[]): ParseResult {
         "total",
       ),
     );
+    if (amount != null) amount = Math.abs(amount);
 
     if (!ticker) {
       skippedRows++;

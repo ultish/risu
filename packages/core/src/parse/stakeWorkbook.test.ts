@@ -237,6 +237,9 @@ describe("Stake activity workbook", () => {
       externalId: "407720026",
       brokerage: 0.17,
     });
+    // Stake's own export signs Value negative for sells (positive for buys);
+    // normalised to unsigned here, consistent with every other parser.
+    expect(result.transactions[0]!.amount).toBeCloseTo(636.13, 2);
   });
 
   it("empty equity sheets → 0 txs with info warning (not hard error)", async () => {
