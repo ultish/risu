@@ -7,7 +7,6 @@ export * from "./csv.js";
 export * from "./yahoo.js";
 export * from "./quoteProviders.js";
 export * from "./income.js";
-export * from "./drpCheck.js";
 export * from "./reconcile.js";
 export * from "./parse/index.js";
 export { parseSharesightPaste } from "./parse/sharesightPaste.js";

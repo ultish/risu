@@ -152,6 +152,8 @@ export default function PerformanceChart({
     filters.portfolioId,
     filters.broker,
     filters.source,
+    filters.ticker,
+    filters.exchange,
     reloadToken,
   ]);
 

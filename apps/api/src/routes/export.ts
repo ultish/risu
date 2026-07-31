@@ -16,7 +16,7 @@ export function registerExportRoutes(
     ) => unknown;
   },
   deps: {
-    db: Database.Database;
+    getDb: () => Database.Database;
     dbPath: string;
   },
 ) {
@@ -51,7 +51,7 @@ export function registerExportRoutes(
     }
     sql += " ORDER BY date ASC, id ASC";
 
-    const rows = deps.db.prepare(sql).all(...params) as Array<{
+    const rows = deps.getDb().prepare(sql).all(...params) as Array<{
       id: number;
       date: string;
       ticker: string;
@@ -88,7 +88,7 @@ export function registerExportRoutes(
 
     // Checkpoint WAL so the main file is self-contained for download
     try {
-      deps.db.pragma("wal_checkpoint(TRUNCATE)");
+      deps.getDb().pragma("wal_checkpoint(TRUNCATE)");
     } catch {
       /* non-fatal */
     }

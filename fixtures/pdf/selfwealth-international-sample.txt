@@ -1,0 +1,137 @@
+USA Detailed Holdings Summary­ Period 1 Jul 2023­ 30 Jun 2024
+Account: Ms Jane Sample
+OpenMarkets Id: 999999
+Phillip Capital Id: SW0000000
+Overall Summary­ 1 Jul 2023­ 30 Jun 2024
+Movement (USD)Value (USD)
+Holdings Valuation as at 1 Jul 2023$0.00
+Holdings Valuation as at 30 Jun 2024$1,000.00$1,000.00
+Total Brokerage$18.00
+Other Charges$0.00
+Estimated Dividends and Distributions$0.00
+Holdings Summary as at 1 Jul 2023Holdings Summary as at 30 Jun 2024
+No holdings as at 1 Jul 2023
+Holdings Valuation as at 1 Jul 2023
+CodeNameUnitsUnit Price (USD)Value (USD)
+No holdings as at 1 Jul 2023
+Holdings Valuation as at 30 Jun 2024
+CodeNameUnitsUnit Price (USD)Value (USD)
+ZZFZeta Fund ETF5$100.00$500.00
+ZZGZeta Growth Fund
+ETF
+10$50.00$500.00
+Total$1,000.00
+Transaction History Period 1 Jul 2023­ 30 Jun 2024
+DateTransactionDescriptionCurrencyCreditDebitBalance
+USD
+4 Jan 2024Buy ContractBUY ZETA FUND ETF ZZF 5 @
+USD100.00
+USD$0.00$500.00$500.00
+Contracts between 1 Jul 2023­ 30 Jun 2024
+Contract
+Date
+Settlement
+Date
+Contract
+Number
+B/SCodeInstrument NameVolume
+Traded
+Price
+Traded
+Value
+FX
+Rate
+Gross
+Settle
+AMT
+BrokerageGST
+Other
+Charges
+Net Settle
+AMT
+USD trades with settlement in USDUSDUSDUSDUSDUSDUSDUSD
+4 Jan 20246 Jan 20242401020001BUYZZFZeta Fund ETF5$100.00$500.001$500.00$8.50$0.85$0.00$509.35
+4 Jan 20246 Jan 20242401020002BUYZZGZeta Growth Fund
+ETF
+10$50.00$500.001$500.00$8.50$0.85$0.00$509.35
+USD trades with settlement in USD Total (2 trades)$1,000.00$1,000.00$17.00$1.70$0.00$1,018.70
+Scrip Movement between 1 Jul 2023­ 30 Jun 2024
+No Scrip Movement during this period.
+Corporate Action Cash Movement between 1 Jul 2023­ 30 Jun 2024
+No Corporate Action Cash Movement during this period.
+support@selfwealth.com.au
+www.selfwealth.com.au
+Account: Ms Jane Sample
+While every effort has been made to provide you with a correct statement, Selfwealth Limited does not accept any liability for any errors or omissions contained in this statement, or any responsibility for any action
+taken in reliance on this statement.
+Selfwealth LimitedABN 52 154 324 428AFSL 421789
+Page: 1 of 2  
+
+USA Detailed Holdings Summary­ Period 1 Jul 2023­ 30 Jun 2024
+Account: Ms Jane Sample
+OpenMarkets Id: 999999
+Phillip Capital Id: SW0000000
+Overall Summary­ 1 Jul 2023­ 30 Jun 2024
+Movement (USD)Value (USD)
+Holdings Valuation as at 1 Jul 2023$0.00
+Holdings Valuation as at 30 Jun 2024$1,000.00$1,000.00
+Total Brokerage$18.00
+Other Charges$0.00
+Estimated Dividends and Distributions$0.00
+Holdings Summary as at 1 Jul 2023Holdings Summary as at 30 Jun 2024
+No holdings as at 1 Jul 2023
+Holdings Valuation as at 1 Jul 2023
+CodeNameUnitsUnit Price (USD)Value (USD)
+No holdings as at 1 Jul 2023
+Holdings Valuation as at 30 Jun 2024
+CodeNameUnitsUnit Price (USD)Value (USD)
+ZZFZeta Fund ETF5$100.00$500.00
+ZZGZeta Growth Fund
+ETF
+10$50.00$500.00
+Total$1,000.00
+Transaction History Period 1 Jul 2023­ 30 Jun 2024
+DateTransactionDescriptionCurrencyCreditDebitBalance
+USD
+4 Jan 2024Buy ContractBUY ZETA FUND ETF ZZF 5 @
+USD100.00
+USD$0.00$500.00$500.00
+Contracts between 1 Jul 2023­ 30 Jun 2024
+Contract
+Date
+Settlement
+Date
+Contract
+Number
+B/SCodeInstrument NameVolume
+Traded
+Price
+Traded
+Value
+FX
+Rate
+Gross
+Settle
+AMT
+BrokerageGST
+Other
+Charges
+Net Settle
+AMT
+USD trades with settlement in USDUSDUSDUSDUSDUSDUSDUSD
+4 Jan 20246 Jan 20242401020001BUYZZFZeta Fund ETF5$100.00$500.001$500.00$8.50$0.85$0.00$509.35
+4 Jan 20246 Jan 20242401020002BUYZZGZeta Growth Fund
+ETF
+10$50.00$500.001$500.00$8.50$0.85$0.00$509.35
+USD trades with settlement in USD Total (2 trades)$1,000.00$1,000.00$17.00$1.70$0.00$1,018.70
+Scrip Movement between 1 Jul 2023­ 30 Jun 2024
+No Scrip Movement during this period.
+Corporate Action Cash Movement between 1 Jul 2023­ 30 Jun 2024
+No Corporate Action Cash Movement during this period.
+support@selfwealth.com.au
+www.selfwealth.com.au
+Account: Ms Jane Sample
+While every effort has been made to provide you with a correct statement, Selfwealth Limited does not accept any liability for any errors or omissions contained in this statement, or any responsibility for any action
+taken in reliance on this statement.
+Selfwealth LimitedABN 52 154 324 428AFSL 421789
+Page: 2 of 2  

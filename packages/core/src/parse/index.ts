@@ -41,6 +41,12 @@ export {
   parseStakeIncomeWorkbook,
   readWorkbook,
 } from "./stakeWorkbook.js";
+export { analyzeStakeDrp } from "./stakeDrp.js";
+export type {
+  StakeDrpAnalysis,
+  StakeDrpFileWarning,
+  StakeDrpProposedTransaction,
+} from "./stakeDrp.js";
 export { extractPdf } from "./pdf/extract.js";
 export type { ExtractedPdf } from "./pdf/extract.js";
 export { detectPdfLayout } from "./pdf/detect.js";

@@ -134,12 +134,30 @@ describe("computeHoldings currency handling", () => {
   });
 });
 
-describe("computeHoldings transfer_in/out duplicate detection", () => {
-  // Real bug: issuer registry annual statements (Computershare, Link/MUFG)
-  // report every CHESS settlement as transfer_in/out with no idea the same
-  // settlement was already imported as a buy/sell from the broker CSV —
-  // doubling the holding. Settlement lands ~T+2 after the trade.
-  it("drops a transfer_in that exactly matches a single nearby buy", () => {
+describe("computeHoldings excludes transfer_in/transfer_out", () => {
+  // transfer_in/transfer_out are shown in the transaction log but never
+  // counted toward holdings, full stop — regardless of whether a matching
+  // buy/sell exists elsewhere. Real bug this replaced: issuer registry PDFs
+  // (Computershare, Link/MUFG) and SelfWealth HIN-conversion rows alike
+  // report transfer_in with no idea whether the same event was already
+  // recorded elsewhere (a broker CSV import, or a pre-existing manual entry)
+  // — since transfer_in never carries a real price/cost either way, blanket
+  // exclusion is simpler and safer than trying to detect duplicates.
+  it("excludes a transfer_in even when nothing else records the same units", () => {
+    const holdings = computeHoldings([
+      tx({
+        date: "2020-01-01",
+        ticker: "VAS",
+        exchange: "ASX",
+        type: "transfer_in",
+        quantity: 50,
+        currency: "AUD",
+      }),
+    ]);
+    expect(holdings.find((h) => h.ticker === "VAS")).toBeUndefined();
+  });
+
+  it("excludes transfer_in even when a matching buy also exists (no double count)", () => {
     const holdings = computeHoldings([
       tx({
         date: "2023-12-12",
@@ -164,81 +182,7 @@ describe("computeHoldings transfer_in/out duplicate detection", () => {
     expect(ndq.costBase).toBeCloseTo(189.38, 2);
   });
 
-  it("drops a transfer_in that exactly matches the SUM of nearby buys (split across broker orders)", () => {
-    const holdings = computeHoldings([
-      tx({
-        date: "2023-12-11",
-        ticker: "IOZ",
-        exchange: "ASX",
-        type: "buy",
-        quantity: 6,
-        amount: 176.75,
-        currency: "AUD",
-      }),
-      tx({
-        date: "2023-12-11",
-        ticker: "IOZ",
-        exchange: "ASX",
-        type: "buy",
-        quantity: 2,
-        amount: 60.2,
-        currency: "AUD",
-      }),
-      tx({
-        date: "2023-12-13",
-        ticker: "IOZ",
-        exchange: "ASX",
-        type: "transfer_in",
-        quantity: 8,
-        currency: "AUD",
-      }),
-    ]);
-    const ioz = holdings.find((h) => h.ticker === "IOZ")!;
-    expect(ioz.quantity).toBeCloseTo(8, 6);
-    expect(ioz.costBase).toBeCloseTo(176.75 + 60.2, 2);
-  });
-
-  it("keeps a transfer_in with no matching nearby buy (genuine external transfer / opening balance)", () => {
-    const holdings = computeHoldings([
-      tx({
-        date: "2020-01-01",
-        ticker: "VAS",
-        exchange: "ASX",
-        type: "transfer_in",
-        quantity: 50,
-        currency: "AUD",
-      }),
-    ]);
-    const vas = holdings.find((h) => h.ticker === "VAS")!;
-    expect(vas.quantity).toBeCloseTo(50, 6);
-  });
-
-  it("keeps a transfer_in outside the settlement window even if quantity matches", () => {
-    const holdings = computeHoldings([
-      tx({
-        date: "2023-01-01",
-        ticker: "VGS",
-        exchange: "ASX",
-        type: "buy",
-        quantity: 10,
-        amount: 500,
-        currency: "AUD",
-      }),
-      tx({
-        date: "2023-06-01", // months later, not a settlement of the January buy
-        ticker: "VGS",
-        exchange: "ASX",
-        type: "transfer_in",
-        quantity: 10,
-        currency: "AUD",
-      }),
-    ]);
-    const vgs = holdings.find((h) => h.ticker === "VGS")!;
-    // Both counted: 10 (buy) + 10 (unexplained transfer) = 20
-    expect(vgs.quantity).toBeCloseTo(20, 6);
-  });
-
-  it("drops a transfer_out that exactly matches a nearby sell (symmetric case)", () => {
+  it("excludes transfer_out from reducing quantity (only a real sell reduces it)", () => {
     const holdings = computeHoldings([
       tx({
         date: "2024-01-01",
@@ -268,7 +212,106 @@ describe("computeHoldings transfer_in/out duplicate detection", () => {
       }),
     ]);
     const bhp = holdings.find((h) => h.ticker === "BHP")!;
-    // Only the real sell's 5 units come off — the duplicate transfer_out is dropped
+    // transfer_out is a no-op for holdings — only the real sell's 5 units come off
     expect(bhp.quantity).toBeCloseTo(15, 6);
+  });
+});
+
+describe("computeHoldings AUD cost base uses per-transaction historical FX", () => {
+  it("sums each buy's own historical rate instead of converting the blended total at today's rate", () => {
+    // Real bug report: TSLA bought in 2018 (AUDUSD ~0.746) and 2025
+    // (AUDUSD ~0.653) — converting the summed USD total at only today's
+    // rate misrepresents years of AUDUSD movement as if every buy happened
+    // today. Each buy should convert at its own date's rate instead.
+    const holdings = computeHoldings(
+      [
+        tx({
+          date: "2018-05-09",
+          ticker: "TSLA",
+          type: "buy",
+          quantity: 2,
+          amount: 600,
+          currency: "USD",
+          fxRateToAud: 0.746, // 600 / 0.746 = 804.29 AUD
+        }),
+        tx({
+          date: "2025-06-10",
+          ticker: "TSLA",
+          type: "buy",
+          quantity: 1,
+          amount: 300,
+          currency: "USD",
+          fxRateToAud: 0.653, // 300 / 0.653 = 459.42 AUD
+        }),
+      ],
+      { prices: {}, fxRates: { "AUDUSD=X": 0.6979 } }, // today's rate — must NOT be used here
+    );
+    const tsla = holdings.find((h) => h.ticker === "TSLA")!;
+    expect(tsla.costBaseAud).toBeCloseTo(600 / 0.746 + 300 / 0.653, 2);
+    // Sanity: NOT the same as converting the 900 USD total at today's rate
+    expect(tsla.costBaseAud).not.toBeCloseTo(900 / 0.6979, 2);
+  });
+
+  it("falls back to today's fxRates for a buy that has no historical rate recorded", () => {
+    const holdings = computeHoldings(
+      [
+        tx({
+          date: "2024-01-01",
+          ticker: "AAPL",
+          type: "buy",
+          quantity: 1,
+          amount: 200,
+          currency: "USD",
+          // fxRateToAud omitted — e.g. imported before this feature existed
+        }),
+      ],
+      { prices: {}, fxRates: { "AUDUSD=X": 0.65 } },
+    );
+    const aapl = holdings.find((h) => h.ticker === "AAPL")!;
+    expect(aapl.costBaseAud).toBeCloseTo(200 / 0.65, 2);
+  });
+
+  it("reduces the AUD cost base proportionally on a sell, same as the native cost base", () => {
+    const holdings = computeHoldings([
+      tx({
+        date: "2020-01-01",
+        ticker: "MSFT",
+        type: "buy",
+        quantity: 10,
+        amount: 2000,
+        currency: "USD",
+        fxRateToAud: 0.7, // 2000 / 0.7 = 2857.14 AUD for 10 units
+      }),
+      tx({
+        date: "2024-01-01",
+        ticker: "MSFT",
+        type: "sell",
+        quantity: 4,
+        amount: 1000,
+        currency: "USD",
+        fxRateToAud: 0.65, // sell-side rate irrelevant to remaining cost base (avg-cost method)
+      }),
+    ]);
+    const msft = holdings.find((h) => h.ticker === "MSFT")!;
+    // avg AUD cost/unit = 285.714; 6 units remain
+    expect(msft.costBaseAud).toBeCloseTo((2000 / 0.7 / 10) * 6, 2);
+  });
+
+  it("is unaffected for AUD-native holdings regardless of fxRateToAud", () => {
+    const holdings = computeHoldings([
+      tx({
+        date: "2024-01-01",
+        ticker: "VAS",
+        exchange: "ASX",
+        type: "buy",
+        quantity: 5,
+        amount: 500,
+        currency: "AUD",
+        fxRateToAud: 0.7, // should be ignored — already AUD
+      }),
+    ]);
+    const vas = holdings.find((h) => h.ticker === "VAS")!;
+    expect(vas.costBaseAud).toBeCloseTo(500, 2);
+    expect(vas.costBaseAud).toBeCloseTo(vas.costBase, 6);
   });
 });

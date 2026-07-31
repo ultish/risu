@@ -23,7 +23,7 @@ export function registerReconcileRoutes(
       handler: (c: Context) => Response | Promise<Response>,
     ) => unknown;
   },
-  deps: { db: Database.Database },
+  deps: { getDb: () => Database.Database },
 ) {
   app.post("/api/import/reconcile", async (c) => {
     const body = await c.req.parseBody();
@@ -42,7 +42,8 @@ export function registerReconcileRoutes(
       return c.json({ error: "file is required" }, 400);
     }
 
-    const portfolio = deps.db
+    const portfolio = deps
+      .getDb()
       .prepare("SELECT id, name FROM portfolios WHERE id = ?")
       .get(portfolioId) as { id: number; name: string } | undefined;
     if (!portfolio) return c.json({ error: "portfolio not found" }, 404);
@@ -85,7 +86,8 @@ export function registerReconcileRoutes(
       );
     }
 
-    let ledgerRows = deps.db
+    let ledgerRows = deps
+      .getDb()
       .prepare(
         `SELECT id, date, ticker, type, quantity, price, external_id
          FROM transactions

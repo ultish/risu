@@ -45,13 +45,14 @@ export function inferSplitEvents(
     let q = qty.get(key) ?? 0;
 
     switch (tx.type) {
+      // transfer_in/transfer_out excluded — same as holdings.ts;
+      // a running balance that includes them would misdetect a split ratio
+      // whenever a transfer happens to land on the same date as one.
       case "buy":
-      case "transfer_in":
       case "drp":
         q += tx.quantity;
         break;
       case "sell":
-      case "transfer_out":
         q = Math.max(0, q - tx.quantity);
         break;
       case "split": {

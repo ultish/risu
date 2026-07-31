@@ -1,0 +1,203 @@
+Detailed Holdings Summary­ Period 1 Jul 2023­ 30 Jun 2024
+Account: Ms Jane Sample
+Holding Identification Number (HIN): X0000000000
+OpenMarkets Id: 999999
+Overall Summary­ 1 Jul 2023­ 30 Jun 2024
+MovementValue
+Holdings Valuation as at 1 Jul 2023$1,400.00
+Holdings Valuation as at 30 Jun 2024$400.00$1,800.00
+Total Brokerage$28.50
+Total Admin Fees$0.00
+Estimated Franking Credits$3.73
+Estimated Dividends and Distributions$14.95
+Holdings Summary as at 1 Jul 2023Holdings Summary as at 30 Jun 2024
+Holdings Valuation as at 1 Jul 2023
+CodeNameUnitsUnit PriceValue
+ZZBSAMPLE FUND B100$10.00$1,000.00
+ZZCSAMPLE FUND C40$10.00$400.00
+Total$1,400.00
+Holdings Valuation as at 30 Jun 2024
+CodeNameUnitsUnit PriceValue
+ZZASAMPLE FUND A30$10.00$300.00
+ZZBSAMPLE FUND B102$9.80$1,000.00
+ZZDSAMPLE FUND D200$2.50$500.00
+Total$1,800.00
+Transaction Summary­ 1 Jul 2023­ 30 Jun 2024
+ZZASAMPLE FUND A
+Trade
+Date
+Settlement
+Date
+ActionReferenceUnitsUnit PriceConsiderationBrokerage *Fees *
+Total
+Consideration
+1 Aug 20233 Aug 2023BuyT20230801100001­150$10.00$500.00$9.50$0.00$509.50
+1 Feb 20243 Feb 2024SellT20240201100005­120$11.00$220.00$9.50$0.00$210.50
+ZZBSAMPLE FUND B
+Trade
+Date
+Settlement
+Date
+ActionReferenceUnitsUnit PriceConsiderationBrokerage *Fees *
+Total
+Consideration
+16 Jul 202316 Jul 2023InCE20230716100002­11$0.00
+Security In: Dividend Plan Allotment
+16 Oct 202316 Oct 2023InCE20231016100003­11$0.00
+Security In: Dividend Plan Allotment
+ZZCSAMPLE FUND C
+Trade
+Date
+Settlement
+Date
+ActionReferenceUnitsUnit PriceConsiderationBrokerage *Fees *
+Total
+Consideration
+20 Apr 202420 Apr 2024InCE73090041$0.00
+Security In: Dividend Plan Allotment
+13 May 202413 May 2024OutCE207033871­140$0.00
+Security Out: Move­Out­PF­Request
+ZZDSAMPLE FUND D
+Trade
+Date
+Settlement
+Date
+ActionReferenceUnitsUnit PriceConsiderationBrokerage *Fees *
+Total
+Consideration
+5 Sep 20235 Sep 2023InCE20230905100006­1200$0.00
+Security In: Effected Registry to HIN Conversion
+* includes GST
+Estimated Dividends and Distributions­ 1 Jul 2023­ 30 Jun 2024
+This represents your estimated cash dividends based on your holding balance at the time of the dividend record date. This does not represent any DRP allocations you may
+have received, additionally any CDI's (CHESS Depositary Interest) held may not reflect the correct dividend depending on your tax status recorded and exchange rate applied
+to the dividend, please refer to your dividend statements issued by the share registry for these details.
+ZZBSAMPLE FUND B
+Ex Div. DatePayment DateTypeDiv. AmountFranking %Units
+Franking
+Credit
+Unfranked
+Amount
+Est. Div
+1 Jul 202316 Jul 2023Final$0.0550%100$1.07$2.50$5.00
+1 Oct 202316 Oct 2023Interim$0.04984.7%101$1.80$0.76$4.95
+Estimated Sub Total$2.87$3.26$9.95
+ZZCSAMPLE FUND C
+Ex Div. DatePayment DateTypeDiv. AmountFranking %Units
+Franking
+Credit
+Unfranked
+Amount
+Est. Div
+1 Jul 202316 Jul 2023Interim$0.12540%40$0.86$3.00$5.00
+Estimated Sub Total$0.86$3.00$5.00
+Estimated Total$3.73$6.26$14.95
+support@selfwealth.com.au
+www.selfwealth.com.au
+Account: Ms Jane Sample
+While every effort has been made to provide you with a correct statement, Selfwealth Limited does not accept any liability for any errors or omissions contained in this statement, or any responsibility for any action
+taken in reliance on this statement.
+Selfwealth LimitedABN 52 154 324 428AFSL 421789
+Page: 1 of 2  
+
+Detailed Holdings Summary­ Period 1 Jul 2023­ 30 Jun 2024
+Account: Ms Jane Sample
+Holding Identification Number (HIN): X0000000000
+OpenMarkets Id: 999999
+Overall Summary­ 1 Jul 2023­ 30 Jun 2024
+MovementValue
+Holdings Valuation as at 1 Jul 2023$1,400.00
+Holdings Valuation as at 30 Jun 2024$400.00$1,800.00
+Total Brokerage$28.50
+Total Admin Fees$0.00
+Estimated Franking Credits$3.73
+Estimated Dividends and Distributions$14.95
+Holdings Summary as at 1 Jul 2023Holdings Summary as at 30 Jun 2024
+Holdings Valuation as at 1 Jul 2023
+CodeNameUnitsUnit PriceValue
+ZZBSAMPLE FUND B100$10.00$1,000.00
+ZZCSAMPLE FUND C40$10.00$400.00
+Total$1,400.00
+Holdings Valuation as at 30 Jun 2024
+CodeNameUnitsUnit PriceValue
+ZZASAMPLE FUND A30$10.00$300.00
+ZZBSAMPLE FUND B102$9.80$1,000.00
+ZZDSAMPLE FUND D200$2.50$500.00
+Total$1,800.00
+Transaction Summary­ 1 Jul 2023­ 30 Jun 2024
+ZZASAMPLE FUND A
+Trade
+Date
+Settlement
+Date
+ActionReferenceUnitsUnit PriceConsiderationBrokerage *Fees *
+Total
+Consideration
+1 Aug 20233 Aug 2023BuyT20230801100001­150$10.00$500.00$9.50$0.00$509.50
+1 Feb 20243 Feb 2024SellT20240201100005­120$11.00$220.00$9.50$0.00$210.50
+ZZBSAMPLE FUND B
+Trade
+Date
+Settlement
+Date
+ActionReferenceUnitsUnit PriceConsiderationBrokerage *Fees *
+Total
+Consideration
+16 Jul 202316 Jul 2023InCE20230716100002­11$0.00
+Security In: Dividend Plan Allotment
+16 Oct 202316 Oct 2023InCE20231016100003­11$0.00
+Security In: Dividend Plan Allotment
+ZZCSAMPLE FUND C
+Trade
+Date
+Settlement
+Date
+ActionReferenceUnitsUnit PriceConsiderationBrokerage *Fees *
+Total
+Consideration
+20 Apr 202420 Apr 2024InCE73090041$0.00
+Security In: Dividend Plan Allotment
+13 May 202413 May 2024OutCE207033871­140$0.00
+Security Out: Move­Out­PF­Request
+ZZDSAMPLE FUND D
+Trade
+Date
+Settlement
+Date
+ActionReferenceUnitsUnit PriceConsiderationBrokerage *Fees *
+Total
+Consideration
+5 Sep 20235 Sep 2023InCE20230905100006­1200$0.00
+Security In: Effected Registry to HIN Conversion
+* includes GST
+Estimated Dividends and Distributions­ 1 Jul 2023­ 30 Jun 2024
+This represents your estimated cash dividends based on your holding balance at the time of the dividend record date. This does not represent any DRP allocations you may
+have received, additionally any CDI's (CHESS Depositary Interest) held may not reflect the correct dividend depending on your tax status recorded and exchange rate applied
+to the dividend, please refer to your dividend statements issued by the share registry for these details.
+ZZBSAMPLE FUND B
+Ex Div. DatePayment DateTypeDiv. AmountFranking %Units
+Franking
+Credit
+Unfranked
+Amount
+Est. Div
+1 Jul 202316 Jul 2023Final$0.0550%100$1.07$2.50$5.00
+1 Oct 202316 Oct 2023Interim$0.04984.7%101$1.80$0.76$4.95
+Estimated Sub Total$2.87$3.26$9.95
+ZZCSAMPLE FUND C
+Ex Div. DatePayment DateTypeDiv. AmountFranking %Units
+Franking
+Credit
+Unfranked
+Amount
+Est. Div
+1 Jul 202316 Jul 2023Interim$0.12540%40$0.86$3.00$5.00
+Estimated Sub Total$0.86$3.00$5.00
+Estimated Total$3.73$6.26$14.95
+support@selfwealth.com.au
+www.selfwealth.com.au
+Account: Ms Jane Sample
+While every effort has been made to provide you with a correct statement, Selfwealth Limited does not accept any liability for any errors or omissions contained in this statement, or any responsibility for any action
+taken in reliance on this statement.
+Selfwealth LimitedABN 52 154 324 428AFSL 421789
+Page: 2 of 2  

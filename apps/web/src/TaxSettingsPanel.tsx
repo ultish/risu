@@ -266,7 +266,7 @@ export function TaxSettingsPanel() {
           width: 100%;
           border-radius: 0.5rem;
           border: 1px solid #374151;
-          background: #111827;
+          background-color: #111827;
           padding: 0.5rem 0.75rem;
           font-size: 0.875rem;
           color: #f3f4f6;

@@ -18,6 +18,11 @@ const LAYOUT_ROUTING: Record<
   },
   "computershare.etf_annual": { suggestedBroker: "generic", suggestedCustody: null },
   "link_mufg.issuer_etf_annual": { suggestedBroker: "generic", suggestedCustody: null },
+  "selfwealth.annual": { suggestedBroker: "selfwealth", suggestedCustody: "selfwealth" },
+  "selfwealth.international_annual": {
+    suggestedBroker: "selfwealth",
+    suggestedCustody: "selfwealth",
+  },
 };
 
 /**

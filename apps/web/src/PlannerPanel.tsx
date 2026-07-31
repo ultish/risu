@@ -1684,10 +1684,14 @@ export function PlannerPanel() {
           width: 100%;
           border-radius: 0.5rem;
           border: 1px solid #374151;
-          background: #111827;
+          background-color: #111827;
           padding: 0.4rem 0.6rem;
           font-size: 0.875rem;
           color: #f3f4f6;
+        }
+        select.field {
+          /* Match left pad (0.6rem) for chevron inset; keep room for icon */
+          background-position: right 0.6rem center;
         }
       `}</style>
     </section>

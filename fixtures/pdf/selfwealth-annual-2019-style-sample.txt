@@ -1,0 +1,101 @@
+Detailed Holdings Summary­ Period 1 Jul 2018­ 30 Jun 2019
+Account: Ms Jane Sample
+Holding Identification Number (HIN): 0000000000
+OpenMarkets Id: 999999
+Overall Summary­ 1 Jul 2018­ 30 Jun 2019
+MovementValue
+Holdings Valuation as at 1 Jul 2018$0.00
+Holdings Valuation as at 30 Jun 2019$500.00$500.00
+Total Brokerage$9.50
+Estimated Franking Credits$3.30
+Estimated Dividends and Distributions$10.00
+Holdings Summary as at 1 Jul 2018Holdings Summary as at 30 Jun 2019
+No holdings as at 1 Jul 2018
+Holdings Valuation as at 1 Jul 2018
+CodeNameUnitsUnit PriceValue
+No holdings as at 1 Jul 2018
+Holdings Valuation as at 30 Jun 2019
+CodeNameUnitsUnit PriceValue
+ZZESAMPLE FUND E50$10.00$500.00
+Total$500.00
+Transaction Summary­ 1 Jul 2018­ 30 Jun 2019
+ZZESAMPLE FUND E
+Order ID
+Trade
+Date
+Settlement
+Date
+ActionContract NoteUnitsUnit PriceConsiderationBrokerage *Total Consideration
+11 Aug 20183 Aug 2018BuyT20180801100001­150$10.00$500.00$9.50$509.50
+* Brokerage includes GST
+Estimated Dividends and Distributions­ 1 Jul 2018­ 30 Jun 2019
+This represents your estimated cash dividends based on your holding balance at the time of the dividend record date. This does not represent any DRP allocations you may
+have received, please refer to your dividend statements issued by the share registry.
+ZZESAMPLE FUND E
+Ex Div. DatePayment DateTypeDiv. AmountFranking %Units
+Franking
+Credit
+Unfranked
+Amount
+Est. Div
+2 Jan 201917 Jan 2019Interim$0.277%50$3.30$2.30$10.00
+Estimated Sub Total$3.30$2.30$10.00
+Estimated Total$3.30$2.30$10.00
+support@selfwealth.com.au
+www.selfwealth.com.au
+Account: Ms Jane Sample
+While every effort has been made to provide you with a correct statement, we give no guarantee of accuracy or reliability and take no responsibility for any errors or omissions including oversight by any SelfWealth
+employee. We recommend you confirm with the registries the contents of this report before using this data.
+SelfWealth LimitedABN 52 154 324 428AFSL 421789
+Page: 1 of 2  
+
+Detailed Holdings Summary­ Period 1 Jul 2018­ 30 Jun 2019
+Account: Ms Jane Sample
+Holding Identification Number (HIN): 0000000000
+OpenMarkets Id: 999999
+Overall Summary­ 1 Jul 2018­ 30 Jun 2019
+MovementValue
+Holdings Valuation as at 1 Jul 2018$0.00
+Holdings Valuation as at 30 Jun 2019$500.00$500.00
+Total Brokerage$9.50
+Estimated Franking Credits$3.30
+Estimated Dividends and Distributions$10.00
+Holdings Summary as at 1 Jul 2018Holdings Summary as at 30 Jun 2019
+No holdings as at 1 Jul 2018
+Holdings Valuation as at 1 Jul 2018
+CodeNameUnitsUnit PriceValue
+No holdings as at 1 Jul 2018
+Holdings Valuation as at 30 Jun 2019
+CodeNameUnitsUnit PriceValue
+ZZESAMPLE FUND E50$10.00$500.00
+Total$500.00
+Transaction Summary­ 1 Jul 2018­ 30 Jun 2019
+ZZESAMPLE FUND E
+Order ID
+Trade
+Date
+Settlement
+Date
+ActionContract NoteUnitsUnit PriceConsiderationBrokerage *Total Consideration
+11 Aug 20183 Aug 2018BuyT20180801100001­150$10.00$500.00$9.50$509.50
+* Brokerage includes GST
+Estimated Dividends and Distributions­ 1 Jul 2018­ 30 Jun 2019
+This represents your estimated cash dividends based on your holding balance at the time of the dividend record date. This does not represent any DRP allocations you may
+have received, please refer to your dividend statements issued by the share registry.
+ZZESAMPLE FUND E
+Ex Div. DatePayment DateTypeDiv. AmountFranking %Units
+Franking
+Credit
+Unfranked
+Amount
+Est. Div
+2 Jan 201917 Jan 2019Interim$0.277%50$3.30$2.30$10.00
+Estimated Sub Total$3.30$2.30$10.00
+Estimated Total$3.30$2.30$10.00
+support@selfwealth.com.au
+www.selfwealth.com.au
+Account: Ms Jane Sample
+While every effort has been made to provide you with a correct statement, we give no guarantee of accuracy or reliability and take no responsibility for any errors or omissions including oversight by any SelfWealth
+employee. We recommend you confirm with the registries the contents of this report before using this data.
+SelfWealth LimitedABN 52 154 324 428AFSL 421789
+Page: 2 of 2  

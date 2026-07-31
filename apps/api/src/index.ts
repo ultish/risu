@@ -2,18 +2,17 @@ import "./env.js";
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import {
-  buildDrpCheck,
   computeHoldings,
   defaultAllocationTemplates,
   defaultCurrencyForExchange,
   fetchFxHistory,
   fetchFxMulti,
+  fxYahooSymbol,
   fetchNasdaqHistory,
   fetchQuotesMulti,
   buildYahooChartHistoryUrl,
   buildYahooQuoteUrl,
   buildYahooSparkHistoryUrl,
-  fetchYahooDividends,
   fetchYahooHistory,
   fetchYahooSparkHistoryBulk,
   fetchYahooQuote,
@@ -43,6 +42,7 @@ import { getDbPath, openDb } from "./db.js";
 import { registerExportRoutes } from "./routes/export.js";
 import { registerPerformanceRoutes } from "./routes/performance.js";
 import { registerReconcileRoutes } from "./routes/reconcile.js";
+import { registerStakeDrpRoutes } from "./routes/stakeDrp.js";
 import { closeYahooBrowser, yahooBrowserFetch } from "./yahooBrowserFetch.js";
 import {
   assertYahooAllowed,
@@ -58,7 +58,10 @@ import {
 // Chromium instance instead. See yahooBrowserFetch.ts for details.
 setYahooFetchImpl(yahooBrowserFetch);
 
-const db = openDb();
+// Reassigned by POST /api/backup/restore after swapping the underlying
+// SQLite file — every handler below reads this binding live (Hono calls
+// them per-request), so a restore doesn't require a process restart.
+let db = openDb();
 const app = new Hono();
 
 /** Absolute path to built web UI (apps/web/dist), if present. */
@@ -237,6 +240,7 @@ function loadTransactions(filters: {
     currency: string;
     external_id: string | null;
     notes: string | null;
+    fx_rate_to_aud: number | null;
   }>;
 
   return rows.map((r) => ({
@@ -251,7 +255,96 @@ function loadTransactions(filters: {
     currency: r.currency,
     externalId: r.external_id,
     notes: r.notes,
+    fxRateToAud: r.fx_rate_to_aud,
   }));
+}
+
+/**
+ * Resolve (and persist into fx_history) the historical AUDUSD-style rate
+ * for each (currency, date) a batch of about-to-be-inserted transactions
+ * needs, so cost base can convert to AUD at the rate that applied on each
+ * transaction's own date rather than today's. Batches one history fetch per
+ * currency pair covering the whole date range needed — importing a whole
+ * PDF/CSV shouldn't mean dozens of individual FX calls. Best-effort: a fetch
+ * failure just leaves those transactions without a historical rate
+ * (computeHoldings falls back to today's rate for them).
+ */
+async function resolveHistoricalFxRates(
+  txs: Array<{ currency: string; date: string }>,
+): Promise<Map<string, number>> {
+  const result = new Map<string, number>(); // key: `${pair}|${date}`
+  const datesByPair = new Map<string, Set<string>>();
+  for (const t of txs) {
+    const pair = fxYahooSymbol(t.currency);
+    if (!pair) continue; // AUD — no conversion needed
+    const set = datesByPair.get(pair) ?? new Set<string>();
+    set.add(t.date);
+    datesByPair.set(pair, set);
+  }
+  if (!datesByPair.size) return result;
+
+  const selectExisting = db.prepare(
+    "SELECT date, rate FROM fx_history WHERE pair = ? AND date BETWEEN ? AND ?",
+  );
+  const upsertRate = db.prepare(
+    `INSERT INTO fx_history (pair, date, rate) VALUES (?, ?, ?)
+     ON CONFLICT(pair, date) DO UPDATE SET rate = excluded.rate`,
+  );
+
+  for (const [pair, dateSet] of datesByPair) {
+    const dates = [...dateSet].sort();
+    const minDate = dates[0]!;
+    const maxDate = dates[dates.length - 1]!;
+
+    const existing = selectExisting.all(pair, minDate, maxDate) as Array<{
+      date: string;
+      rate: number;
+    }>;
+    const have = new Set(existing.map((r) => r.date));
+    for (const r of existing) result.set(`${pair}|${r.date}`, r.rate);
+
+    if (dates.every((d) => have.has(d))) continue;
+
+    try {
+      const hist = await fetchFxHistory(pair, {
+        period1: new Date(minDate),
+        // Pad a day past the newest date needed — chart-style period2 can
+        // behave as an exclusive upper bound near the boundary.
+        period2: new Date(new Date(maxDate).getTime() + 86_400_000),
+      });
+      for (const pt of hist.points) {
+        upsertRate.run(pair, pt.date, pt.rate);
+        result.set(`${pair}|${pt.date}`, pt.rate);
+      }
+    } catch {
+      // best-effort — those transactions just fall back to today's rate
+    }
+  }
+  return result;
+}
+
+/** Nearest available historical rate for (currency, date) within a small trading-gap window. */
+function fxRateNear(
+  rates: Map<string, number>,
+  currency: string,
+  date: string,
+): number | null {
+  const pair = fxYahooSymbol(currency);
+  if (!pair) return null;
+  const exact = rates.get(`${pair}|${date}`);
+  if (exact != null) return exact;
+  const base = new Date(date).getTime();
+  for (let i = 1; i <= 5; i++) {
+    const back = new Date(base - i * 86_400_000).toISOString().slice(0, 10);
+    const r = rates.get(`${pair}|${back}`);
+    if (r != null) return r;
+  }
+  for (let i = 1; i <= 5; i++) {
+    const fwd = new Date(base + i * 86_400_000).toISOString().slice(0, 10);
+    const r = rates.get(`${pair}|${fwd}`);
+    if (r != null) return r;
+  }
+  return null;
 }
 
 function priceMapsFromCache(): {
@@ -281,9 +374,74 @@ function priceMapsFromCache(): {
   return { prices, fxRates };
 }
 
-registerPerformanceRoutes(app, { db, loadTransactions });
-registerExportRoutes(app, { db, dbPath: getDbPath() });
-registerReconcileRoutes(app, { db });
+const getDb = () => db;
+registerPerformanceRoutes(app, { getDb, loadTransactions });
+registerExportRoutes(app, { getDb, dbPath: getDbPath() });
+registerReconcileRoutes(app, { getDb });
+registerStakeDrpRoutes(app, { getDb });
+
+const SQLITE_MAGIC = Buffer.from("SQLite format 3\0", "utf8");
+
+/**
+ * POST /api/backup/restore — replace the live SQLite database with an
+ * uploaded file (e.g. one downloaded via GET /api/export/backup).
+ *
+ * Destructive: overwrites all current data. A timestamped safety copy of the
+ * live file is made first, so an accidental/wrong-file restore is trivially
+ * undoable (copy the `.pre-restore-*.bak` file back over the live one and
+ * restart). Stale `-wal`/`-shm` sidecars are removed before the swap — left
+ * in place, they'd get replayed on top of the freshly-restored file on next
+ * open, silently reintroducing stale data or corrupting it.
+ *
+ * No process restart needed: `db` is a `let` binding every handler in this
+ * file (and the getDb()-based route modules) reads live, so reassigning it
+ * here is immediately visible everywhere.
+ */
+app.post("/api/backup/restore", async (c) => {
+  const body = await c.req.parseBody();
+  const file = body["file"];
+  if (!file || typeof file === "string") {
+    return c.json({ error: "file is required" }, 400);
+  }
+
+  const buf = Buffer.from(await file.arrayBuffer());
+  if (buf.length < SQLITE_MAGIC.length || !buf.subarray(0, SQLITE_MAGIC.length).equals(SQLITE_MAGIC)) {
+    return c.json({ error: "That doesn't look like a SQLite database file" }, 400);
+  }
+
+  const dbPath = getDbPath();
+  const walPath = `${dbPath}-wal`;
+  const shmPath = `${dbPath}-shm`;
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const safetyCopyPath = `${dbPath}.pre-restore-${stamp}.bak`;
+
+  try {
+    db.pragma("wal_checkpoint(TRUNCATE)");
+  } catch {
+    /* non-fatal */
+  }
+  db.close();
+
+  try {
+    if (fs.existsSync(dbPath)) fs.copyFileSync(dbPath, safetyCopyPath);
+    if (fs.existsSync(walPath)) fs.rmSync(walPath);
+    if (fs.existsSync(shmPath)) fs.rmSync(shmPath);
+    fs.writeFileSync(dbPath, buf);
+    db = openDb(dbPath);
+    return c.json({ ok: true, dbPath, safetyCopy: safetyCopyPath });
+  } catch (err) {
+    // Best-effort recovery so the server doesn't stay stuck with a closed
+    // db handle — re-open whatever's on disk (the safety copy contents if
+    // the write itself failed partway, otherwise the original file
+    // untouched). The caught error below is still the real signal.
+    try {
+      db = openDb(dbPath);
+    } catch {
+      /* ignore — the 500 below already surfaces the real failure */
+    }
+    return c.json({ error: `Restore failed: ${(err as Error).message}` }, 500);
+  }
+});
 
 // ─── Transactions ───────────────────────────────────────────────────────────
 
@@ -394,11 +552,16 @@ app.post("/api/transactions", async (c) => {
   const source = body.source || "manual";
   const externalId = `manual|${body.date}|${exchange}|${body.ticker}|${body.type}|${body.quantity}|${body.price ?? ""}|${Date.now()}`;
 
+  const fxRates = await resolveHistoricalFxRates([
+    { currency, date: body.date },
+  ]);
+  const fxRate = fxRateNear(fxRates, currency, body.date);
+
   const info = db
     .prepare(
       `INSERT INTO transactions
-        (portfolio_id, account_id, import_batch_id, date, ticker, exchange, type, quantity, price, amount, brokerage, currency, external_id, notes, source, broker, custody)
-       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        (portfolio_id, account_id, import_batch_id, date, ticker, exchange, type, quantity, price, amount, brokerage, currency, external_id, notes, source, broker, custody, fx_rate_to_aud)
+       VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       portfolioId,
@@ -417,6 +580,7 @@ app.post("/api/transactions", async (c) => {
       source,
       broker,
       broker,
+      fxRate,
     );
 
   return c.json(
@@ -448,13 +612,26 @@ app.patch("/api/transactions/:id", async (c) => {
     portfolioId: number;
   }>>();
 
+  const newDate = (body.date ?? existing.date) as string;
+  const newCurrency = (
+    body.currency ?? (existing.currency as string)
+  )
+    .toString()
+    .toUpperCase();
+  // Re-resolve rather than trust the old fx_rate_to_aud — a date/currency
+  // edit would otherwise leave a stale rate attached to this transaction.
+  const fxRates = await resolveHistoricalFxRates([
+    { currency: newCurrency, date: newDate },
+  ]);
+  const fxRate = fxRateNear(fxRates, newCurrency, newDate);
+
   db.prepare(
     `UPDATE transactions SET
       date=?, ticker=?, exchange=?, type=?, quantity=?, price=?, amount=?, brokerage=?, currency=?, notes=?,
-      broker=?, custody=?, source=?, portfolio_id=?
+      broker=?, custody=?, source=?, portfolio_id=?, fx_rate_to_aud=?
      WHERE id=?`,
   ).run(
-    body.date ?? existing.date,
+    newDate,
     (body.ticker ?? (existing.ticker as string)).toString().toUpperCase(),
     (body.exchange ?? (existing.exchange as string)).toString().toUpperCase(),
     body.type ?? existing.type,
@@ -462,12 +639,13 @@ app.patch("/api/transactions/:id", async (c) => {
     body.price !== undefined ? body.price : existing.price,
     body.amount !== undefined ? body.amount : existing.amount,
     body.brokerage ?? existing.brokerage,
-    (body.currency ?? (existing.currency as string)).toString().toUpperCase(),
+    newCurrency,
     body.notes !== undefined ? body.notes : existing.notes,
     body.broker !== undefined ? body.broker : existing.broker,
     body.broker !== undefined ? body.broker : existing.custody,
     body.source !== undefined ? body.source : existing.source,
     body.portfolioId ?? existing.portfolio_id,
+    fxRate,
     id,
   );
 
@@ -611,260 +789,6 @@ app.get("/api/income", (c) => {
   });
 });
 
-// ─── Holding flags (DRP/DRIP enabled) ───────────────────────────────────────
-
-app.get("/api/holdings/flags", (c) => {
-  const portfolioId = c.req.query("portfolioId") || c.req.query("accountId");
-  if (!portfolioId) {
-    return c.json({ error: "portfolioId is required" }, 400);
-  }
-  const rows = db
-    .prepare(
-      `SELECT portfolio_id, ticker, exchange, drp_enabled, drp_from_date
-       FROM holding_flags
-       WHERE portfolio_id = ?
-       ORDER BY exchange, ticker`,
-    )
-    .all(Number(portfolioId)) as Array<{
-    portfolio_id: number;
-    ticker: string;
-    exchange: string;
-    drp_enabled: number;
-    drp_from_date: string | null;
-  }>;
-
-  return c.json({
-    portfolioId: Number(portfolioId),
-    flags: rows.map((r) => ({
-      portfolioId: r.portfolio_id,
-      ticker: r.ticker,
-      exchange: r.exchange,
-      drpEnabled: Boolean(r.drp_enabled),
-      drpFromDate: r.drp_from_date,
-    })),
-  });
-});
-
-app.put("/api/holdings/flags", async (c) => {
-  const body = await c.req.json<{
-    portfolioId?: number;
-    accountId?: number;
-    ticker: string;
-    exchange?: string;
-    drpEnabled: boolean;
-    drpFromDate?: string | null;
-  }>();
-
-  const portfolioId = body.portfolioId ?? body.accountId;
-  if (!portfolioId || !body.ticker?.trim()) {
-    return c.json({ error: "portfolioId and ticker required" }, 400);
-  }
-
-  const portfolio = db
-    .prepare("SELECT id FROM portfolios WHERE id = ?")
-    .get(portfolioId) as { id: number } | undefined;
-  if (!portfolio) return c.json({ error: "portfolio not found" }, 404);
-
-  const ticker = body.ticker.trim().toUpperCase();
-  const exchange = (body.exchange || "ASX").toUpperCase();
-  const drpEnabled = body.drpEnabled ? 1 : 0;
-  const drpFromDate =
-    body.drpFromDate && body.drpFromDate.trim()
-      ? body.drpFromDate.trim().slice(0, 10)
-      : null;
-
-  db.prepare(
-    `INSERT INTO holding_flags (portfolio_id, ticker, exchange, drp_enabled, drp_from_date)
-     VALUES (?, ?, ?, ?, ?)
-     ON CONFLICT(portfolio_id, ticker, exchange) DO UPDATE SET
-       drp_enabled = excluded.drp_enabled,
-       drp_from_date = excluded.drp_from_date`,
-  ).run(portfolioId, ticker, exchange, drpEnabled, drpFromDate);
-
-  const row = db
-    .prepare(
-      `SELECT portfolio_id, ticker, exchange, drp_enabled, drp_from_date
-       FROM holding_flags
-       WHERE portfolio_id = ? AND ticker = ? AND exchange = ?`,
-    )
-    .get(portfolioId, ticker, exchange) as {
-    portfolio_id: number;
-    ticker: string;
-    exchange: string;
-    drp_enabled: number;
-    drp_from_date: string | null;
-  };
-
-  return c.json({
-    portfolioId: row.portfolio_id,
-    ticker: row.ticker,
-    exchange: row.exchange,
-    drpEnabled: Boolean(row.drp_enabled),
-    drpFromDate: row.drp_from_date,
-  });
-});
-
-// ─── DRP/DRIP check (suggestions only — never writes ledger) ────────────────
-
-app.get("/api/drp-check", async (c) => {
-  const portfolioId = c.req.query("portfolioId") || c.req.query("accountId");
-  const ticker = (c.req.query("ticker") || "").toUpperCase();
-  const exchange = (c.req.query("exchange") || "ASX").toUpperCase();
-
-  if (!portfolioId || !ticker) {
-    return c.json(
-      { error: "portfolioId and ticker are required" },
-      400,
-    );
-  }
-
-  const pid = Number(portfolioId);
-  const flagRow = db
-    .prepare(
-      `SELECT ticker, exchange, drp_enabled, drp_from_date
-       FROM holding_flags
-       WHERE portfolio_id = ? AND ticker = ? AND exchange = ?`,
-    )
-    .get(pid, ticker, exchange) as
-    | {
-        ticker: string;
-        exchange: string;
-        drp_enabled: number;
-        drp_from_date: string | null;
-      }
-    | undefined;
-
-  const txs = loadTransactions({ portfolioId: pid }).filter(
-    (t) =>
-      t.ticker.toUpperCase() === ticker &&
-      (t.exchange || "ASX").toUpperCase() === exchange,
-  );
-
-  const symbol = toYahooSymbol(ticker, exchange);
-  let dividends: Awaited<ReturnType<typeof fetchYahooDividends>> = [];
-  let yahooError: string | null = null;
-  let yahooSource: "cache" | "yahoo" | "none" = "none";
-
-  // force=1 always hits Yahoo; otherwise skip live call when cache is fresh
-  const forceYahoo =
-    c.req.query("force") === "1" || c.req.query("refresh") === "1";
-  /** Default 7 days — dividends don't change every click */
-  const cacheMaxAgeHours = Number(c.req.query("cacheHours") || 168);
-
-  const cachedMeta = db
-    .prepare(
-      `SELECT MAX(fetched_at) AS fetched_at, COUNT(*) AS n
-       FROM dividend_cache WHERE symbol = ?`,
-    )
-    .get(symbol) as { fetched_at: string | null; n: number } | undefined;
-
-  const cachedDivs = db
-    .prepare(
-      `SELECT date, amount FROM dividend_cache WHERE symbol = ? ORDER BY date`,
-    )
-    .all(symbol) as Array<{ date: string; amount: number }>;
-  if (cachedDivs.length) {
-    dividends = cachedDivs.map((d) => ({
-      date: d.date,
-      amount: d.amount,
-      frankingPercent: null,
-    }));
-    yahooSource = "cache";
-  }
-
-  const cacheAgeMs = cachedMeta?.fetched_at
-    ? Date.now() - new Date(cachedMeta.fetched_at + "Z").getTime()
-    : Infinity;
-  // SQLite datetime is UTC-ish without Z; if parse fails, treat as stale
-  const cacheFresh =
-    cachedDivs.length > 0 &&
-    Number.isFinite(cacheAgeMs) &&
-    cacheAgeMs < cacheMaxAgeHours * 3600 * 1000;
-
-  // Only hit Yahoo when forced or cache stale — never on mere page load.
-  // Respect cool-down unless force=1 (UI should still warn).
-  let shouldHitYahoo = forceYahoo || !cacheFresh;
-  if (shouldHitYahoo) {
-    try {
-      assertYahooAllowed(db, { force: forceYahoo });
-    } catch (e) {
-      shouldHitYahoo = false;
-      const msg = e instanceof Error ? e.message : String(e);
-      if (dividends.length) {
-        yahooError = `${msg} — using ${dividends.length} cached dividend(s).`;
-      } else {
-        yahooError = msg;
-      }
-    }
-  }
-
-  if (shouldHitYahoo) {
-    try {
-      const fresh = await fetchYahooDividends(ticker, { exchange });
-      if (fresh.length) {
-        dividends = fresh;
-        yahooSource = "yahoo";
-        recordYahooSuccess(db);
-        const upsert = db.prepare(
-          `INSERT INTO dividend_cache (symbol, date, amount, fetched_at)
-           VALUES (?, ?, ?, datetime('now'))
-           ON CONFLICT(symbol, date) DO UPDATE SET
-             amount = excluded.amount,
-             fetched_at = excluded.fetched_at`,
-        );
-        const write = db.transaction((rows: typeof fresh) => {
-          for (const d of rows) upsert.run(symbol, d.date, d.amount);
-        });
-        write(fresh);
-      } else if (!dividends.length) {
-        yahooError =
-          "Yahoo returned no dividend events for this symbol (or blocked the request). Import cash dividends / DRP from your broker or Sharesight instead.";
-      } else {
-        recordYahooSuccess(db);
-      }
-    } catch (e) {
-      recordYahooFailure(db, e);
-      const msg = e instanceof Error ? e.message : String(e);
-      if (dividends.length) {
-        yahooError = `${msg} — using ${dividends.length} cached dividend(s).`;
-      } else {
-        yahooError = `${msg} Tip: import dividend_cash / DRP rows from Sharesight or your broker — DRP check does not need live Yahoo.`;
-      }
-    }
-  } else if (dividends.length && !yahooError) {
-    yahooError = null; // quiet success from cache
-  }
-
-  const result = buildDrpCheck({
-    ticker,
-    exchange,
-    flag: flagRow
-      ? {
-          ticker: flagRow.ticker,
-          exchange: flagRow.exchange,
-          drpEnabled: Boolean(flagRow.drp_enabled),
-          drpFromDate: flagRow.drp_from_date,
-        }
-      : {
-          ticker,
-          exchange,
-          drpEnabled: false,
-          drpFromDate: null,
-        },
-    dividends,
-    transactions: txs,
-  });
-
-  return c.json({
-    ...result,
-    portfolioId: pid,
-    yahooDividendCount: dividends.length,
-    yahooError,
-    yahooSource,
-    yahooCacheFresh: cacheFresh,
-  });
-});
-
 // ─── Import file ────────────────────────────────────────────────────────────
 
 app.post("/api/import", async (c) => {
@@ -947,8 +871,8 @@ app.post("/api/import", async (c) => {
 
   const insertTx = db.prepare(
     `INSERT OR IGNORE INTO transactions
-      (portfolio_id, account_id, import_batch_id, date, ticker, exchange, type, quantity, price, amount, brokerage, currency, external_id, notes, source, broker, custody)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (portfolio_id, account_id, import_batch_id, date, ticker, exchange, type, quantity, price, amount, brokerage, currency, external_id, notes, source, broker, custody, fx_rate_to_aud)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
 
   /**
@@ -967,7 +891,8 @@ app.post("/api/import", async (c) => {
        import_batch_id = ?,
        source = ?,
        broker = ?,
-       custody = ?
+       custody = ?,
+       fx_rate_to_aud = COALESCE(fx_rate_to_aud, ?)
      WHERE portfolio_id = ?
        AND external_id = ?
        AND (
@@ -982,11 +907,14 @@ app.post("/api/import", async (c) => {
     t.externalId ||
     `${t.date}|${t.exchange}|${t.ticker}|${t.type}|${t.quantity}|${t.price ?? ""}|${t.amount ?? ""}|${t.currency}`;
 
+  const fxRates = await resolveHistoricalFxRates(parsed.transactions);
+
   let imported = 0;
   let updated = 0;
   const insertMany = db.transaction((txs: ParsedTransaction[]) => {
     for (const t of txs) {
       const ext = fingerprint(t);
+      const fxRate = fxRateNear(fxRates, t.currency, t.date);
       const info = insertTx.run(
         portfolioId,
         portfolioId, // legacy NOT NULL account_id
@@ -1005,6 +933,7 @@ app.post("/api/import", async (c) => {
         source,
         broker,
         broker,
+        fxRate,
       );
       if (info.changes > 0) {
         imported++;
@@ -1023,6 +952,7 @@ app.post("/api/import", async (c) => {
           source,
           broker,
           broker,
+          fxRate,
           portfolioId,
           ext,
           t.type,
@@ -1057,6 +987,94 @@ app.post("/api/import", async (c) => {
     layoutId: parsed.layoutId ?? null,
     confidence: parsed.confidence ?? null,
   });
+});
+
+// ─── Import history ─────────────────────────────────────────────────────────
+
+/**
+ * GET /api/import/history?portfolioId=
+ *
+ * Helps answer "which files have I already imported, and up to what date"
+ * before starting a new import session:
+ * - `files`: one row per (portfolio, filename) — re-importing the same
+ *   filename overwrites its row with the latest attempt (`importCount`
+ *   tracks how many times), rather than piling up duplicate history entries.
+ * - `byBroker`: latest transaction date already in the ledger per custody,
+ *   so e.g. "SelfWealth data goes up to 2023-06-30" is visible without
+ *   cross-referencing individual files.
+ */
+app.get("/api/import/history", (c) => {
+  const portfolioId = c.req.query("portfolioId") || c.req.query("accountId");
+  const pid = portfolioId ? Number(portfolioId) : undefined;
+
+  const filesSql = `
+    SELECT ib.filename, ib.broker, ib.source, ib.created_at AS importedAt,
+           ib.row_count AS rowCount, ib.imported_count AS importedCount,
+           ib.skipped_count AS skippedCount, ib.portfolio_id AS portfolioId,
+           p.name AS portfolioName,
+           (SELECT COUNT(*) FROM import_batches x
+              WHERE x.filename = ib.filename AND x.portfolio_id = ib.portfolio_id) AS importCount
+    FROM import_batches ib
+    JOIN portfolios p ON p.id = ib.portfolio_id
+    WHERE ib.id IN (
+      SELECT MAX(id) FROM import_batches
+      ${pid ? "WHERE portfolio_id = ?" : ""}
+      GROUP BY portfolio_id, filename
+    )
+    ${pid ? "AND ib.portfolio_id = ?" : ""}
+    ORDER BY ib.created_at DESC
+  `;
+  const filesParams = pid ? [pid, pid] : [];
+  const files = db.prepare(filesSql).all(...filesParams) as Array<{
+    filename: string;
+    broker: string | null;
+    source: string | null;
+    importedAt: string;
+    rowCount: number;
+    importedCount: number;
+    skippedCount: number;
+    portfolioId: number;
+    portfolioName: string;
+    importCount: number;
+  }>;
+
+  const brokerDatesSql = `
+    SELECT COALESCE(broker, custody) AS broker, MAX(date) AS latestTransactionDate, COUNT(*) AS transactionCount
+    FROM transactions
+    WHERE (broker IS NOT NULL OR custody IS NOT NULL)
+      ${pid ? "AND portfolio_id = ?" : ""}
+    GROUP BY COALESCE(broker, custody)
+  `;
+  const brokerDates = db.prepare(brokerDatesSql).all(...(pid ? [pid] : [])) as Array<{
+    broker: string;
+    latestTransactionDate: string | null;
+    transactionCount: number;
+  }>;
+
+  const lastImportedSql = `
+    SELECT broker, MAX(created_at) AS lastImportedAt
+    FROM import_batches
+    ${pid ? "WHERE portfolio_id = ?" : ""}
+    GROUP BY broker
+  `;
+  const lastImported = db.prepare(lastImportedSql).all(...(pid ? [pid] : [])) as Array<{
+    broker: string | null;
+    lastImportedAt: string;
+  }>;
+  const lastImportedByBroker = new Map(
+    lastImported.map((r) => [r.broker ?? "", r.lastImportedAt]),
+  );
+
+  const byBroker = brokerDates
+    .map((r) => ({
+      broker: r.broker,
+      latestTransactionDate: r.latestTransactionDate,
+      transactionCount: r.transactionCount,
+      lastImportedAt: lastImportedByBroker.get(r.broker) ?? null,
+    }))
+    .sort((a, b) => (b.latestTransactionDate ?? "").localeCompare(a.latestTransactionDate ?? ""));
+
+  return c.json({ files, byBroker });
 });
 
 // ─── Paste Sharesight ───────────────────────────────────────────────────────
@@ -1116,9 +1134,11 @@ app.post("/api/import/paste", async (c) => {
 
   const insertTx = db.prepare(
     `INSERT OR IGNORE INTO transactions
-      (portfolio_id, account_id, import_batch_id, date, ticker, exchange, type, quantity, price, amount, brokerage, currency, external_id, notes, source, broker, custody)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (portfolio_id, account_id, import_batch_id, date, ticker, exchange, type, quantity, price, amount, brokerage, currency, external_id, notes, source, broker, custody, fx_rate_to_aud)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+
+  const fxRates = await resolveHistoricalFxRates(parsed.transactions);
 
   let imported = 0;
   const insertMany = db.transaction((txs: ParsedTransaction[]) => {
@@ -1141,6 +1161,7 @@ app.post("/api/import/paste", async (c) => {
         source,
         broker,
         broker,
+        fxRateNear(fxRates, t.currency, t.date),
       );
       if (info.changes > 0) imported++;
     }
@@ -1852,6 +1873,7 @@ app.get("/api/prices/:ticker", async (c) => {
 
 const SETTINGS_DEFAULTS: Record<string, string> = {
   yahoo_refresh_enabled: "0",
+  yahoo_auto_refresh_minutes: "5",
   us_withholding_pct: "15",
 };
 
@@ -1875,6 +1897,7 @@ app.put("/api/settings", async (c) => {
   const body = await c.req.json<{
     settings?: Record<string, string | number | boolean | null>;
     yahoo_refresh_enabled?: string | number | boolean;
+    yahoo_auto_refresh_minutes?: string | number;
     us_withholding_pct?: string | number;
   }>();
 
@@ -1883,6 +1906,7 @@ app.put("/api/settings", async (c) => {
       ? { ...body.settings }
       : {
           yahoo_refresh_enabled: body.yahoo_refresh_enabled,
+          yahoo_auto_refresh_minutes: body.yahoo_auto_refresh_minutes,
           us_withholding_pct: body.us_withholding_pct,
         };
 
@@ -1893,6 +1917,7 @@ app.put("/api/settings", async (c) => {
 
   const allowed = new Set([
     "yahoo_refresh_enabled",
+    "yahoo_auto_refresh_minutes",
     "us_withholding_pct",
   ]);
 
@@ -1907,6 +1932,15 @@ app.put("/api/settings", async (c) => {
         raw === "true" ||
         raw === "on";
       value = on ? "1" : "0";
+    } else if (key === "yahoo_auto_refresh_minutes") {
+      const n = Number(raw);
+      if (!Number.isFinite(n) || n < 1 || n > 1440) {
+        return c.json(
+          { error: "yahoo_auto_refresh_minutes must be 1–1440" },
+          400,
+        );
+      }
+      value = String(Math.round(n));
     } else if (key === "us_withholding_pct") {
       const n = Number(raw);
       if (Number.isNaN(n) || n < 0 || n > 100) {
@@ -1938,6 +1972,47 @@ app.delete("/api/settings/caches", (c) => {
     fx_history: db.prepare("DELETE FROM fx_history").run().changes,
   };
   return c.json({ ok: true, deleted });
+});
+
+/**
+ * One-time (repeatable) backfill: resolve fx_rate_to_aud for existing
+ * non-AUD transactions that predate this feature (or were imported while
+ * Yahoo/Frankfurter were both unreachable). Safe to re-run — only touches
+ * rows still missing a rate.
+ */
+app.post("/api/settings/backfill-fx", async (c) => {
+  const missing = db
+    .prepare(
+      `SELECT id, currency, date FROM transactions
+       WHERE currency != 'AUD' AND fx_rate_to_aud IS NULL`,
+    )
+    .all() as Array<{ id: number; currency: string; date: string }>;
+
+  if (!missing.length) {
+    return c.json({ ok: true, candidates: 0, resolved: 0, unresolved: 0 });
+  }
+
+  const fxRates = await resolveHistoricalFxRates(missing);
+  const update = db.prepare(
+    "UPDATE transactions SET fx_rate_to_aud = ? WHERE id = ?",
+  );
+  let resolved = 0;
+  const run = db.transaction((rows: typeof missing) => {
+    for (const row of rows) {
+      const rate = fxRateNear(fxRates, row.currency, row.date);
+      if (rate == null) continue;
+      update.run(rate, row.id);
+      resolved++;
+    }
+  });
+  run(missing);
+
+  return c.json({
+    ok: true,
+    candidates: missing.length,
+    resolved,
+    unresolved: missing.length - resolved,
+  });
 });
 
 // ─── Tax profiles (Phase 3) ─────────────────────────────────────────────────

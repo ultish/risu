@@ -87,7 +87,7 @@ export function getYahooStatus(db: Database.Database): YahooStatus {
   let state: YahooStatus["state"] = "ok";
   let label = "Yahoo ready";
   let note =
-    "Prices use cache on page load. Yahoo is only called when you click Refresh (or force DRP).";
+    "Prices use cache on page load. Yahoo is only called when you click Refresh (or via auto-refresh, if enabled in Settings).";
 
   if (cooling) {
     state = "cooling";

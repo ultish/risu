@@ -45,64 +45,6 @@ export type HoldingsPriceMaps = {
   splitEvents?: SplitEvent[];
 };
 
-/** Settlement lands at most this many days after the trade that caused it. */
-const TRANSFER_DUPLICATE_WINDOW_DAYS = 5;
-
-function daysBetween(fromIso: string, toIso: string): number {
-  return Math.round(
-    (new Date(toIso).getTime() - new Date(fromIso).getTime()) /
-      (1000 * 60 * 60 * 24),
-  );
-}
-
-/**
- * Issuer registry annual statements (Computershare, Link/MUFG) report every
- * CHESS settlement as a `transfer_in`/`transfer_out` row — the registry has
- * no way to know the same settlement was already recorded as a `buy`/`sell`
- * from the actual broker import (e.g. a Pocket CSV). When a transfer's
- * quantity is *exactly* explained by nearby buy/sell quantity for the same
- * instrument (settlement typically lands T+2, so within a few days of the
- * trade), it's that duplicate, not a genuine external transfer — drop it
- * before accumulating holdings/cost base.
- *
- * Only an exact quantity match is dropped; a partial/ambiguous match is left
- * alone rather than guessed at (docs §15.3 "warn > silent drop" — silently
- * discarding a real transfer would be far worse than leaving a rare
- * unresolved double-count visible).
- */
-function dropDuplicateTransfers(
-  transactions: ParsedTransaction[],
-): ParsedTransaction[] {
-  const byKey = new Map<string, ParsedTransaction[]>();
-  for (const tx of transactions) {
-    const key = holdingPriceKey(tx.exchange || "ASX", tx.ticker);
-    const list = byKey.get(key);
-    if (list) list.push(tx);
-    else byKey.set(key, [tx]);
-  }
-
-  const drop = new Set<ParsedTransaction>();
-  for (const list of byKey.values()) {
-    for (const t of list) {
-      if (t.type !== "transfer_in" && t.type !== "transfer_out") continue;
-      const wantType = t.type === "transfer_in" ? "buy" : "sell";
-      const nearbySum = list
-        .filter(
-          (o) =>
-            o.type === wantType &&
-            o.date <= t.date &&
-            daysBetween(o.date, t.date) <= TRANSFER_DUPLICATE_WINDOW_DAYS,
-        )
-        .reduce((sum, o) => sum + o.quantity, 0);
-      if (nearbySum > 0 && Math.abs(nearbySum - t.quantity) < 1e-9) {
-        drop.add(t);
-      }
-    }
-  }
-
-  return drop.size ? transactions.filter((t) => !drop.has(t)) : transactions;
-}
-
 /**
  * Build current holdings from a chronological transaction ledger.
  * Cost base is always accumulated in the ticker's exchange-canonical
@@ -118,7 +60,7 @@ export function computeHoldings(
       : { prices: marketPrices as Record<string, number | null> };
   const fx = maps.fxRates ?? {};
 
-  const sorted = [...dropDuplicateTransfers(transactions)].sort((a, b) =>
+  const sorted = [...transactions].sort((a, b) =>
     a.date.localeCompare(b.date),
   );
   const map = new Map<
@@ -129,6 +71,16 @@ export function computeHoldings(
       currency: string;
       quantity: number;
       costBase: number;
+      /**
+       * AUD cost base accumulated per-transaction using each buy's own
+       * historical FX rate (tx.fxRateToAud) when known, falling back to
+       * today's rate only for the transactions that lack one — unlike
+       * `costBase` above, which stays in native currency and only gets
+       * converted to AUD once at the very end (see costBaseAud below).
+       */
+      costBaseAudHist: number;
+      /** False until at least one buy successfully contributes a known AUD amount. */
+      costBaseAudKnown: boolean;
     }
   >();
 
@@ -156,11 +108,18 @@ export function computeHoldings(
       currency: canonicalCurrency,
       quantity: 0,
       costBase: 0,
+      costBaseAudHist: 0,
+      costBaseAudKnown: false,
     };
 
     switch (tx.type) {
+      // transfer_in/transfer_out are intentionally excluded from holdings —
+      // shown in the transaction log, never counted here. They never carry a
+      // real price/cost (issuer PDFs and broker HIN-conversion rows alike
+      // report bare unit counts), so a "missing offsetting buy" would produce
+      // an inaccurate cost base regardless of whether the quantity is
+      // counted; the user has confirmed this tradeoff is acceptable.
       case "buy":
-      case "transfer_in":
       case "drp": {
         const unitCost =
           tx.price ??
@@ -178,14 +137,31 @@ export function computeHoldings(
               costAddNative);
         cur.quantity += tx.quantity;
         cur.costBase += costAdd;
+
+        // AUD side: this transaction's own historical rate when known
+        // (accurate), else today's rate for just this contribution (best
+        // effort) — never the blended "convert the whole total at today's
+        // rate" approach, which misrepresents years of AUDUSD movement as
+        // if every buy happened today.
+        const costAddAud =
+          cur.currency === "AUD"
+            ? costAdd
+            : tx.fxRateToAud != null
+              ? costAddNative / tx.fxRateToAud
+              : toAud(costAddNative, txCurrency, fx);
+        if (costAddAud != null) {
+          cur.costBaseAudHist += costAddAud;
+          cur.costBaseAudKnown = true;
+        }
         break;
       }
-      case "sell":
-      case "transfer_out": {
+      case "sell": {
         if (cur.quantity <= 0) break;
         const sellQty = Math.min(tx.quantity, cur.quantity);
         const avg = cur.costBase / cur.quantity;
+        const avgAud = cur.costBaseAudHist / cur.quantity;
         cur.costBase -= avg * sellQty;
+        cur.costBaseAudHist -= avgAud * sellQty;
         cur.quantity -= sellQty;
         break;
       }
@@ -200,6 +176,7 @@ export function computeHoldings(
     if (cur.quantity < 1e-10) {
       cur.quantity = 0;
       cur.costBase = 0;
+      cur.costBaseAudHist = 0;
     }
 
     map.set(key, cur);
@@ -243,7 +220,16 @@ export function computeHoldings(
     }
 
     // Cost and quote currency are now always the same canonical currency.
-    const costBaseAud = toAud(h.costBase, costCcy, fx);
+    // AUD cost base uses the per-transaction historical-rate accumulator
+    // (see the buy/drp case above) rather than re-converting
+    // the native-currency total at today's rate — years of AUDUSD movement
+    // otherwise get misrepresented as if every purchase happened today.
+    const costBaseAud =
+      costCcy === "AUD"
+        ? h.costBase
+        : h.costBaseAudKnown
+          ? h.costBaseAudHist
+          : null;
     const marketValueAud =
       marketValue != null ? toAud(marketValue, quoteCcy, fx) : null;
 

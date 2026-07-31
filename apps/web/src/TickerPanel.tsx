@@ -1,13 +1,24 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import {
   type Filters,
   type Holding,
   type InstrumentAssumptionsDto,
   type TxRow,
+  deleteTransactions,
   fetchInstrumentAssumptions,
   fetchTransactions,
 } from "./api";
-import { Empty, ExchangeBadge, Panel, TypeBadge, money, qty } from "./App";
+import {
+  Empty,
+  ExchangeBadge,
+  Panel,
+  SortTh,
+  TypeBadge,
+  money,
+  qty,
+  sortValue,
+  type TxSortKey,
+} from "./App";
 import PerformanceChart from "./PerformanceChart";
 
 type Props = {
@@ -18,6 +29,10 @@ type Props = {
   reloadToken?: number | string;
   onBack: () => void;
   onViewLedger: () => void;
+  /** Rendered directly above the transactions table, right next to what it filters. */
+  filterBar: ReactNode;
+  /** Called after a delete so the caller can reload holdings/totals elsewhere. */
+  onChanged?: () => void;
 };
 
 export function TickerPanel({
@@ -28,10 +43,18 @@ export function TickerPanel({
   reloadToken,
   onBack,
   onViewLedger,
+  filterBar,
+  onChanged,
 }: Props) {
   const [txs, setTxs] = useState<TxRow[]>([]);
   const [txError, setTxError] = useState<string | null>(null);
   const [txLoading, setTxLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [txSort, setTxSort] = useState<{ key: TxSortKey; dir: "asc" | "desc" }>({
+    key: "date",
+    dir: "desc",
+  });
+  const [selectedTxIds, setSelectedTxIds] = useState<Set<number>>(new Set());
 
   const [detail, setDetail] = useState<InstrumentAssumptionsDto | null>(null);
 
@@ -39,6 +62,7 @@ export function TickerPanel({
     let cancelled = false;
     setTxLoading(true);
     setTxError(null);
+    setSelectedTxIds(new Set());
     void fetchTransactions(filters)
       .then((rows) => {
         if (!cancelled) setTxs(rows);
@@ -55,6 +79,47 @@ export function TickerPanel({
     };
   }, [filters.portfolioId, filters.ticker, filters.exchange]);
 
+  function toggleTxSort(key: TxSortKey) {
+    setTxSort((s) =>
+      s.key === key
+        ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: key === "date" ? "desc" : "asc" },
+    );
+  }
+
+  function toggleSelectTx(id: number) {
+    setSelectedTxIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllVisible(ids: number[]) {
+    const allOn = ids.length > 0 && ids.every((id) => selectedTxIds.has(id));
+    setSelectedTxIds(allOn ? new Set() : new Set(ids));
+  }
+
+  async function onDeleteSelected() {
+    const ids = [...selectedTxIds];
+    if (!ids.length) return;
+    if (!confirm(`Delete ${ids.length} transaction(s)?`)) return;
+    setBusy(true);
+    setTxError(null);
+    try {
+      await deleteTransactions(ids);
+      setSelectedTxIds(new Set());
+      const rows = await fetchTransactions(filters);
+      setTxs(rows);
+      onChanged?.();
+    } catch (e) {
+      setTxError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     void fetchInstrumentAssumptions(ticker, { exchange })
@@ -69,7 +134,19 @@ export function TickerPanel({
     };
   }, [ticker, exchange]);
 
-  const sortedTxs = [...txs].sort((a, b) => b.date.localeCompare(a.date));
+  const sortedTxs = useMemo(() => {
+    const list = [...txs];
+    const { key, dir } = txSort;
+    const mul = dir === "asc" ? 1 : -1;
+    list.sort((a, b) => {
+      const av = sortValue(a, key);
+      const bv = sortValue(b, key);
+      if (av < bv) return -1 * mul;
+      if (av > bv) return 1 * mul;
+      return (b.id - a.id) * mul;
+    });
+    return list;
+  }, [txs, txSort]);
   const hasAbout = detail && (detail.name || detail.issuer || detail.productUrl);
 
   return (
@@ -174,6 +251,8 @@ export function TickerPanel({
 
       <PerformanceChart filters={filters} reloadToken={reloadToken} />
 
+      {filterBar}
+
       <Panel title={`Transactions · ${ticker}`}>
         {txLoading && <p className="text-xs text-gray-500">Loading…</p>}
         {txError && <p className="text-xs text-red-400">{txError}</p>}
@@ -181,48 +260,123 @@ export function TickerPanel({
           <Empty hint="No transactions for this ticker in the current filter." />
         )}
         {!txLoading && sortedTxs.length > 0 && (
-          <div className="max-h-[420px] overflow-auto rounded-lg border border-gray-800">
-            <table className="w-full min-w-[700px] text-left text-sm">
-              <thead className="sticky top-0 z-10 bg-gray-900 text-xs uppercase tracking-wide text-gray-500 shadow">
-                <tr>
-                  <th className="px-2 py-2 font-medium">Date</th>
-                  <th className="px-2 py-2 font-medium">Type</th>
-                  <th className="px-2 py-2 font-medium">Broker</th>
-                  <th className="px-2 py-2 font-medium">Source</th>
-                  <th className="px-2 py-2 font-medium">Qty</th>
-                  <th className="px-2 py-2 font-medium">Price</th>
-                  <th className="px-2 py-2 font-medium">Amount</th>
-                </tr>
-              </thead>
-              <tbody>
-                {sortedTxs.map((t) => (
-                  <tr key={t.id} className="border-t border-gray-800/80">
-                    <td className="px-2 py-1.5 tabular-nums text-gray-300">
-                      {t.date}
-                    </td>
-                    <td className="px-2 py-1.5">
-                      <TypeBadge type={t.type} />
-                    </td>
-                    <td className="px-2 py-1.5 text-xs text-gray-400">
-                      {t.broker || t.custody || "—"}
-                    </td>
-                    <td className="max-w-[120px] truncate px-2 py-1.5 text-xs text-gray-500">
-                      {t.source || "—"}
-                    </td>
-                    <td className="px-2 py-1.5 tabular-nums">
-                      {qty(t.quantity)}
-                    </td>
-                    <td className="px-2 py-1.5 tabular-nums">
-                      {t.price != null ? money(t.price, t.currency, true) : "—"}
-                    </td>
-                    <td className="px-2 py-1.5 tabular-nums">
-                      {money(t.amount, t.currency, true)}
-                    </td>
+          <>
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              <span className="text-xs text-gray-500">
+                {sortedTxs.length} row{sortedTxs.length === 1 ? "" : "s"}
+                {selectedTxIds.size > 0
+                  ? ` · ${selectedTxIds.size} selected`
+                  : ""}
+              </span>
+              <div className="flex-1" />
+              <button
+                type="button"
+                disabled={busy || selectedTxIds.size === 0}
+                onClick={() => void onDeleteSelected()}
+                className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-1.5 text-xs text-red-200 hover:bg-red-900/40 disabled:opacity-40"
+              >
+                Delete selected
+              </button>
+            </div>
+            <div className="max-h-[420px] overflow-auto rounded-lg border border-gray-800">
+              <table className="w-full min-w-[760px] text-left text-sm">
+                <thead className="sticky top-0 z-10 bg-gray-900 text-xs uppercase tracking-wide text-gray-500 shadow">
+                  <tr>
+                    <th className="w-10 px-2 py-2.5">
+                      <input
+                        type="checkbox"
+                        checked={
+                          sortedTxs.length > 0 &&
+                          sortedTxs.every((t) => selectedTxIds.has(t.id))
+                        }
+                        onChange={() =>
+                          toggleSelectAllVisible(sortedTxs.map((t) => t.id))
+                        }
+                        aria-label="Select all"
+                      />
+                    </th>
+                    <SortTh
+                      label="Date"
+                      active={txSort.key === "date"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("date")}
+                    />
+                    <SortTh
+                      label="Type"
+                      active={txSort.key === "type"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("type")}
+                    />
+                    <SortTh
+                      label="Broker"
+                      active={txSort.key === "broker"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("broker")}
+                    />
+                    <SortTh
+                      label="Source"
+                      active={txSort.key === "source"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("source")}
+                    />
+                    <SortTh
+                      label="Qty"
+                      active={txSort.key === "quantity"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("quantity")}
+                    />
+                    <th className="px-2 py-2 font-medium">Price</th>
+                    <SortTh
+                      label="Amount"
+                      active={txSort.key === "amount"}
+                      dir={txSort.dir}
+                      onClick={() => toggleTxSort("amount")}
+                    />
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </thead>
+                <tbody>
+                  {sortedTxs.map((t) => (
+                    <tr
+                      key={t.id}
+                      className={`border-t border-gray-800/80 ${
+                        selectedTxIds.has(t.id) ? "bg-sky-500/10" : ""
+                      }`}
+                    >
+                      <td className="px-2 py-1">
+                        <input
+                          type="checkbox"
+                          checked={selectedTxIds.has(t.id)}
+                          onChange={() => toggleSelectTx(t.id)}
+                          aria-label={`Select ${t.id}`}
+                        />
+                      </td>
+                      <td className="px-2 py-1.5 tabular-nums text-gray-300">
+                        {t.date}
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <TypeBadge type={t.type} />
+                      </td>
+                      <td className="px-2 py-1.5 text-xs text-gray-400">
+                        {t.broker || t.custody || "—"}
+                      </td>
+                      <td className="max-w-[120px] truncate px-2 py-1.5 text-xs text-gray-500">
+                        {t.source || "—"}
+                      </td>
+                      <td className="px-2 py-1.5 tabular-nums">
+                        {qty(t.quantity)}
+                      </td>
+                      <td className="px-2 py-1.5 tabular-nums">
+                        {t.price != null ? money(t.price, t.currency, true) : "—"}
+                      </td>
+                      <td className="px-2 py-1.5 tabular-nums">
+                        {money(t.amount, t.currency, true)}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </Panel>
     </div>

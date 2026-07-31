@@ -47,6 +47,14 @@ export const ParsedTransaction = z.object({
   notes: z.string().nullable(),
   /** Raw row from file for debugging */
   raw: z.record(z.string(), z.unknown()).optional(),
+  /**
+   * Historical AUDUSD=X-style rate (foreign units per 1 AUD) on this
+   * transaction's own date — set by the API at import time, never by
+   * parsers. Null/undefined for AUD-native transactions or when no
+   * historical rate could be resolved (computeHoldings falls back to
+   * today's rate for that transaction's contribution).
+   */
+  fxRateToAud: z.number().nullable().optional(),
 });
 export type ParsedTransaction = z.infer<typeof ParsedTransaction>;
 

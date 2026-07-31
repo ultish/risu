@@ -10,6 +10,8 @@ export type LayoutId =
   | "computershare.etf_annual"
   | "link_mufg.issuer_etf_annual"
   | "betashares_direct.platform_annual"
+  | "selfwealth.annual"
+  | "selfwealth.international_annual"
   | "unknown";
 
 export type DetectConfidence = "high" | "low" | "none";
@@ -33,6 +35,8 @@ export const LAYOUT_LABELS: Record<LayoutId, string> = {
   "computershare.etf_annual": "Computershare ETF annual",
   "link_mufg.issuer_etf_annual": "Link/MUFG issuer ETF annual",
   "betashares_direct.platform_annual": "Betashares Direct annual",
+  "selfwealth.annual": "SelfWealth AU annual statement",
+  "selfwealth.international_annual": "SelfWealth International annual statement",
   unknown: "Unknown layout",
 };
 

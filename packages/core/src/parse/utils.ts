@@ -1,3 +1,18 @@
+const MONTH_ABBR = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+
 /** Parse AU/US-ish dates into yyyy-mm-dd */
 export function parseDate(raw: string): string | null {
   const s = raw.trim();
@@ -19,6 +34,20 @@ export function parseDate(raw: string): string | null {
 
   // mm/dd/yyyy (US — Selfwealth Excel risk)
   // Only use if first number > 12 would fail AU — ambiguous left as AU-first above.
+
+  // "D Mon YYYY" / "DD Mon YYYY" (Selfwealth PDF annual statements). Handled
+  // explicitly and in UTC — the generic Date.parse fallback below parses this
+  // shape in the local timezone, which silently shifts the date backward by
+  // one day in any timezone ahead of UTC (e.g. Australia).
+  const named = s.match(
+    /^(\d{1,2}) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]* (\d{4})$/,
+  );
+  if (named) {
+    const d = Number(named[1]);
+    const m = MONTH_ABBR.indexOf(named[2]) + 1;
+    const y = Number(named[3]);
+    if (d >= 1 && d <= 31) return `${y}-${pad(m)}-${pad(d)}`;
+  }
 
   // Excel serial (rare in CSV text)
   const serial = Number(s);

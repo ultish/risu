@@ -22,13 +22,15 @@ Trade Date, Settlement Date, Symbol, Name, Side, Trade Identifier, Units, Avg. P
 `;
 
 describe("PDF layout registry — Stake PDF guard", () => {
-  it("registers exactly the three Phase 3+4 layouts", () => {
+  it("registers exactly the five registered layouts", () => {
     const ids = LAYOUT_PARSERS.map((l) => l.id).sort();
     expect(ids).toEqual(
       [
         "betashares_direct.platform_annual",
         "computershare.etf_annual",
         "link_mufg.issuer_etf_annual",
+        "selfwealth.annual",
+        "selfwealth.international_annual",
       ].sort(),
     );
   });

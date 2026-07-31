@@ -224,6 +224,93 @@ export async function importFile(opts: {
   );
 }
 
+export type ImportHistoryFile = {
+  filename: string;
+  broker: string | null;
+  source: string | null;
+  importedAt: string;
+  rowCount: number;
+  importedCount: number;
+  skippedCount: number;
+  portfolioId: number;
+  portfolioName: string;
+  importCount: number;
+};
+
+export type ImportHistoryByBroker = {
+  broker: string;
+  latestTransactionDate: string | null;
+  transactionCount: number;
+  lastImportedAt: string | null;
+};
+
+export type ImportHistory = {
+  files: ImportHistoryFile[];
+  byBroker: ImportHistoryByBroker[];
+};
+
+/** Which files have already been imported (deduped by filename — the latest
+ * attempt wins), plus the latest transaction date already in the ledger per
+ * broker/custody. Helps answer "have I imported this year's statement yet". */
+export async function fetchImportHistory(portfolioId?: number) {
+  const p = new URLSearchParams();
+  if (portfolioId != null) p.set("portfolioId", String(portfolioId));
+  const qsStr = p.toString();
+  return json<ImportHistory>(
+    await fetch(`${BASE}/api/import/history${qsStr ? `?${qsStr}` : ""}`),
+  );
+}
+
+export type StakeDrpProposed = {
+  date: string;
+  ticker: string;
+  exchange: string;
+  type: string;
+  quantity: number;
+  price: number | null;
+  amount: number | null;
+  brokerage: number;
+  currency: string;
+  externalId: string | null;
+  notes: string | null;
+  fundedBy: string;
+};
+
+export type StakeDrpWarning = {
+  ticker?: string;
+  message: string;
+  severity: string;
+};
+
+export type StakeDrpResult = {
+  proposed: StakeDrpProposed[];
+  warnings: StakeDrpWarning[];
+  unrecognizedFiles: string[];
+  committed: boolean;
+  inserted?: number;
+  skippedExisting?: number;
+};
+
+/**
+ * Stake DRP detection — analyze (commit=false, default) or insert
+ * (commit=true) drp transactions inferred from any mix of Activity/Income/
+ * Valuation Stake workbooks. Separate, on-demand tool — does not touch the
+ * regular per-file import flow.
+ */
+export async function analyzeStakeDrp(opts: {
+  files: File[];
+  portfolioId: number;
+  commit?: boolean;
+}) {
+  const fd = new FormData();
+  for (const f of opts.files) fd.append("files", f);
+  fd.append("portfolioId", String(opts.portfolioId));
+  if (opts.commit) fd.append("commit", "true");
+  return json<StakeDrpResult>(
+    await fetch(`${BASE}/api/import/stake-drp`, { method: "POST", body: fd }),
+  );
+}
+
 /** Read-only diff of a Stake Investment Activity XLSX vs ledger rows — no writes. */
 export async function reconcileFile(opts: {
   file: File;
@@ -366,87 +453,6 @@ export async function importYahooPayload(
   );
 }
 
-// ─── Phase 2: DRP flags / check ─────────────────────────────────────────────
-// FY cash-dividend Income UI removed for now; GET /api/income + core helpers remain.
-
-export type HoldingFlag = {
-  portfolioId: number;
-  ticker: string;
-  exchange: string;
-  drpEnabled: boolean;
-  drpFromDate: string | null;
-};
-
-export type DrpSuggestion = {
-  date: string;
-  ticker: string;
-  exchange: string;
-  cashDiv: number;
-  expectedShares: number | null;
-  unitsHeld: number;
-  amountPerShare: number;
-  note: string;
-};
-
-export type DrpCheckResult = {
-  portfolioId: number;
-  ticker: string;
-  exchange: string;
-  drpEnabled: boolean;
-  drpFromDate: string | null;
-  suggestions: DrpSuggestion[];
-  importedDrp: Array<{
-    date: string;
-    quantity: number;
-    amount: number | null;
-    price: number | null;
-  }>;
-  unmatchedSuggestions: DrpSuggestion[];
-  notes: string[];
-  yahooDividendCount: number;
-  yahooError: string | null;
-  yahooSource?: "cache" | "yahoo" | "none";
-  yahooCacheFresh?: boolean;
-};
-
-export async function fetchHoldingFlags(portfolioId: number) {
-  return json<{ portfolioId: number; flags: HoldingFlag[] }>(
-    await fetch(
-      `${BASE}/api/holdings/flags?portfolioId=${encodeURIComponent(String(portfolioId))}`,
-    ),
-  );
-}
-
-export async function putHoldingFlag(body: {
-  portfolioId: number;
-  ticker: string;
-  exchange: string;
-  drpEnabled: boolean;
-  drpFromDate?: string | null;
-}) {
-  return json<HoldingFlag>(
-    await fetch(`${BASE}/api/holdings/flags`, {
-      method: "PUT",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    }),
-  );
-}
-
-export async function fetchDrpCheck(opts: {
-  portfolioId: number;
-  ticker: string;
-  exchange?: string;
-}) {
-  const p = new URLSearchParams();
-  p.set("portfolioId", String(opts.portfolioId));
-  p.set("ticker", opts.ticker);
-  if (opts.exchange) p.set("exchange", opts.exchange);
-  return json<DrpCheckResult>(
-    await fetch(`${BASE}/api/drp-check?${p.toString()}`),
-  );
-}
-
 export type PerformancePoint = {
   date: string;
   costBaseAud: number | null;
@@ -472,6 +478,20 @@ export function exportTransactionsCsvUrl(f: Filters = {}) {
 /** Relative URL for full SQLite backup download */
 export function exportBackupUrl() {
   return `${BASE}/api/export/backup`;
+}
+
+/**
+ * Replace the live SQLite database with an uploaded backup file. Destructive
+ * — overwrites all current data (the server keeps a timestamped safety copy
+ * of the live file first, so an accidental wrong-file restore is recoverable
+ * from disk, but the running app immediately reflects the uploaded file).
+ */
+export async function restoreBackup(file: File) {
+  const fd = new FormData();
+  fd.append("file", file);
+  return json<{ ok: true; dbPath: string; safetyCopy: string }>(
+    await fetch(`${BASE}/api/backup/restore`, { method: "POST", body: fd }),
+  );
 }
 
 // ─── Phase 3/4: tax profiles + planner ──────────────────────────────────────
@@ -711,6 +731,7 @@ export async function fetchPlannerTemplates() {
 
 export type AppSettings = {
   yahoo_refresh_enabled: string;
+  yahoo_auto_refresh_minutes: string;
   us_withholding_pct: string;
   [key: string]: string;
 };
@@ -738,6 +759,7 @@ export async function fetchSettings() {
 export async function putSettings(
   settings: Partial<{
     yahoo_refresh_enabled: string | boolean;
+    yahoo_auto_refresh_minutes: string | number;
     us_withholding_pct: string | number;
   }>,
 ) {
@@ -761,4 +783,18 @@ export async function wipeCaches() {
       fx_cache: number;
     };
   }>(await fetch(`${BASE}/api/settings/caches`, { method: "DELETE" }));
+}
+
+/**
+ * Resolve historical AUDUSD-style FX rates for existing non-AUD
+ * transactions that don't have one yet (e.g. imported before this feature
+ * existed). Safe to re-run — only touches rows still missing a rate.
+ */
+export async function backfillFxRates() {
+  return json<{
+    ok: boolean;
+    candidates: number;
+    resolved: number;
+    unresolved: number;
+  }>(await fetch(`${BASE}/api/settings/backfill-fx`, { method: "POST" }));
 }

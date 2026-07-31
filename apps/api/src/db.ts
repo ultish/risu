@@ -170,6 +170,12 @@ function migrate(db: Database.Database) {
   addColumnIfMissing(db, "transactions", "source", "TEXT");
   addColumnIfMissing(db, "transactions", "broker", "TEXT");
   addColumnIfMissing(db, "transactions", "custody", "TEXT");
+  // Historical AUDUSD=X-style rate (foreign units per 1 AUD) on this
+  // transaction's own date, resolved at import time — lets cost base sum
+  // per-transaction AUD amounts instead of re-converting the whole native-
+  // currency total at today's rate. NULL for AUD-native transactions or
+  // when no historical rate could be resolved (falls back to today's rate).
+  addColumnIfMissing(db, "transactions", "fx_rate_to_aud", "REAL");
   addColumnIfMissing(db, "import_batches", "portfolio_id", "INTEGER");
   addColumnIfMissing(db, "import_batches", "source", "TEXT");
 

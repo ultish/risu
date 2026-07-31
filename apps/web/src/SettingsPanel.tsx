@@ -1,9 +1,12 @@
 /**
  * Settings — app preferences, DB path, cache wipe (Phase 5).
- * Preferences only; Yahoo refresh remains a manual button elsewhere.
+ * The Yahoo auto-refresh on/off + interval preferences set here are read by
+ * App.tsx on load to decide whether to auto-fetch; the header button always
+ * remains available for an on-demand refresh regardless of this setting.
  */
 import { useCallback, useEffect, useState } from "react";
 import {
+  backfillFxRates,
   fetchHealth,
   fetchSettings,
   fetchYahooStatus,
@@ -19,11 +22,13 @@ export function SettingsPanel() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [dbPath, setDbPath] = useState<string | null>(null);
   const [yahooRefresh, setYahooRefresh] = useState(false);
+  const [yahooAutoRefreshMinutes, setYahooAutoRefreshMinutes] = useState("5");
   const [usWithholdingPct, setUsWithholdingPct] = useState("15");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
   const [wipeMsg, setWipeMsg] = useState<string | null>(null);
+  const [fxBackfillMsg, setFxBackfillMsg] = useState<string | null>(null);
   const [yahooStatus, setYahooStatus] = useState<YahooStatus | null>(null);
   const [yahooPaste, setYahooPaste] = useState("");
   const [yahooSymbolHint, setYahooSymbolHint] = useState("");
@@ -44,6 +49,7 @@ export function SettingsPanel() {
         s.settings.yahoo_refresh_enabled === "1" ||
           s.settings.yahoo_refresh_enabled === "true",
       );
+      setYahooAutoRefreshMinutes(s.settings.yahoo_auto_refresh_minutes ?? "5");
       setUsWithholdingPct(s.settings.us_withholding_pct ?? "15");
       if (y) setYahooStatus(y);
     } catch (e) {
@@ -63,12 +69,18 @@ export function SettingsPanel() {
       setError("US withholding % must be between 0 and 100");
       return;
     }
+    const minutes = Number(yahooAutoRefreshMinutes);
+    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 1440) {
+      setError("Auto-refresh interval must be between 1 and 1440 minutes");
+      return;
+    }
     setBusy(true);
     setError(null);
     setSaved(false);
     try {
       const res = await putSettings({
         yahoo_refresh_enabled: yahooRefresh ? "1" : "0",
+        yahoo_auto_refresh_minutes: String(Math.round(minutes)),
         us_withholding_pct: String(pct),
       });
       setSettings(res.settings);
@@ -97,6 +109,28 @@ export function SettingsPanel() {
       const d = res.deleted;
       setWipeMsg(
         `Cleared caches: quotes ${d.quote_cache}, bars ${d.price_cache}, dividends ${d.dividend_cache}, FX ${d.fx_cache}`,
+      );
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function onBackfillFx() {
+    setBusy(true);
+    setError(null);
+    setFxBackfillMsg(null);
+    try {
+      const r = await backfillFxRates();
+      setFxBackfillMsg(
+        r.candidates === 0
+          ? "Nothing to backfill — every non-AUD transaction already has a rate."
+          : `Resolved ${r.resolved}/${r.candidates} transaction(s)${
+              r.unresolved
+                ? `; ${r.unresolved} still unresolved (no FX data available for that date)`
+                : ""
+            }.`,
       );
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -176,12 +210,36 @@ export function SettingsPanel() {
               }}
             />
             <span>
-              <span className="block">Yahoo preference flag (manual still)</span>
+              <span className="block">Auto-refresh Yahoo prices on page load</span>
               <span className="mt-0.5 block text-xs text-gray-500">
-                Page load never calls Yahoo. Prices refresh only via the header
-                button. After a 429, the app cools down (15m→1h→3h→6h, or
-                Retry-After if Yahoo sends one) and shows a countdown badge.
+                When on, opening the app fetches fresh prices automatically —
+                throttled to at most once per interval below (repeated
+                browser refreshes won't spam Yahoo). The header button still
+                always works for an on-demand refresh. After a 429, the app
+                cools down (1h→3h→6h→12h, or Retry-After if Yahoo sends one)
+                and shows a countdown badge; auto-refresh skips itself while
+                cooling.
               </span>
+            </span>
+          </label>
+
+          <label className="block text-sm max-w-xs">
+            <span className="mb-1 block text-xs text-gray-500">
+              Auto-refresh interval (minutes)
+            </span>
+            <input
+              className="field"
+              inputMode="numeric"
+              value={yahooAutoRefreshMinutes}
+              disabled={busy}
+              onChange={(e) => {
+                setSaved(false);
+                setYahooAutoRefreshMinutes(e.target.value);
+              }}
+            />
+            <span className="mt-1 block text-xs text-gray-500">
+              Minimum time between automatic refreshes on page load. Default
+              5 minutes.
             </span>
           </label>
 
@@ -300,6 +358,32 @@ export function SettingsPanel() {
             <p className="mt-2 text-xs text-emerald-300/90">{wipeMsg}</p>
           )}
         </div>
+
+        <div className="rounded-xl border border-gray-800 bg-gray-950/40 p-4">
+          <h3 className="mb-2 text-sm font-medium text-gray-200">
+            Historical FX rates
+          </h3>
+          <p className="mb-3 text-xs text-gray-500">
+            Non-AUD holdings (e.g. US stocks) now convert cost base to AUD
+            using the exchange rate on each purchase's own date, not today's
+            rate re-applied to the total. New imports resolve this
+            automatically; run this once to backfill transactions imported
+            before this existed.
+          </p>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onBackfillFx()}
+            className="rounded-lg border border-sky-800/60 bg-sky-950/40 px-4 py-2 text-sm text-sky-100 hover:bg-sky-900/40 disabled:opacity-50"
+          >
+            {busy ? "Working…" : "Backfill missing FX rates"}
+          </button>
+          {fxBackfillMsg && (
+            <p className="mt-2 text-xs text-emerald-300/90">
+              {fxBackfillMsg}
+            </p>
+          )}
+        </div>
       </div>
 
       <div className="mt-4">
@@ -311,7 +395,7 @@ export function SettingsPanel() {
           width: 100%;
           border-radius: 0.5rem;
           border: 1px solid #374151;
-          background: #111827;
+          background-color: #111827;
           padding: 0.5rem 0.75rem;
           font-size: 0.875rem;
           color: #f3f4f6;

@@ -20,7 +20,7 @@ export function registerPerformanceRoutes(
     ) => unknown;
   },
   deps: {
-    db: Database.Database;
+    getDb: () => Database.Database;
     loadTransactions: (filters: {
       portfolioId?: number;
       broker?: string;
@@ -45,9 +45,10 @@ export function registerPerformanceRoutes(
       exchange,
     });
 
-    const priceSeries = loadPriceSeries(deps.db);
-    const fxRates = loadFxRates(deps.db);
-    const fxSeries = loadFxHistory(deps.db);
+    const db = deps.getDb();
+    const priceSeries = loadPriceSeries(db);
+    const fxRates = loadFxRates(db);
+    const fxSeries = loadFxHistory(db);
 
     const points = buildPerformanceSeries(txs, {
       priceSeries,

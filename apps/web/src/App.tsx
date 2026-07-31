@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+  type AppSettings,
   type FilterMeta,
   type Holding,
   type ImportResult,
@@ -14,6 +15,7 @@ import {
   fetchFilterMeta,
   fetchHoldings,
   fetchPortfolios,
+  fetchSettings,
   fetchTransactions,
   fetchYahooStatus,
   importFile,
@@ -22,8 +24,9 @@ import {
   refreshPrices,
 } from "./api";
 import { Disclaimer } from "./Disclaimer";
-import { DrpCheckPanel } from "./DrpCheckPanel";
 import ExportBar from "./ExportBar";
+import ImportHistoryPanel from "./ImportHistoryPanel";
+import StakeDrpPanel from "./StakeDrpPanel";
 import PerformanceChart from "./PerformanceChart";
 import { PlannerPanel } from "./PlannerPanel";
 import { SettingsPanel } from "./SettingsPanel";
@@ -36,15 +39,12 @@ const MAIN_TABS = [
   "transactions",
   "ticker",
   "import",
-  "tax",
   "planner",
   "settings",
 ] as const;
 type MainTab = (typeof MAIN_TABS)[number];
-const IMPORT_SUBS = ["file", "paste", "manual"] as const;
+const IMPORT_SUBS = ["file", "paste", "stakeDrp", "manual"] as const;
 type ImportSub = (typeof IMPORT_SUBS)[number];
-const TAX_SUBS = ["profiles", "drp"] as const;
-type TaxSub = (typeof TAX_SUBS)[number];
 
 function isMainTab(v: string | null | undefined): v is MainTab {
   return !!v && (MAIN_TABS as readonly string[]).includes(v);
@@ -52,15 +52,11 @@ function isMainTab(v: string | null | undefined): v is MainTab {
 function isImportSub(v: string | null | undefined): v is ImportSub {
   return !!v && (IMPORT_SUBS as readonly string[]).includes(v);
 }
-function isTaxSub(v: string | null | undefined): v is TaxSub {
-  return !!v && (TAX_SUBS as readonly string[]).includes(v);
-}
 
 /** Read nav from `?tab=` (preferred) or `#tab` hash. */
 function readNavFromUrl(): {
   tab: MainTab;
   importSub: ImportSub;
-  taxSub: TaxSub;
 } {
   const url = new URL(window.location.href);
   const qTab = url.searchParams.get("tab");
@@ -73,32 +69,26 @@ function readNavFromUrl(): {
   const importSub: ImportSub = isImportSub(url.searchParams.get("import"))
     ? (url.searchParams.get("import") as ImportSub)
     : "file";
-  const taxSub: TaxSub = isTaxSub(url.searchParams.get("tax"))
-    ? (url.searchParams.get("tax") as TaxSub)
-    : "profiles";
-  return { tab, importSub, taxSub };
+  return { tab, importSub };
 }
 
-/** Push or replace `?tab=` (and import/tax sub params). Clears bare hash. */
+/** Push or replace `?tab=` (and import sub param). Clears bare hash. */
 function writeNavToUrl(
   tab: MainTab,
   importSub: ImportSub,
-  taxSub: TaxSub,
   mode: "push" | "replace" = "push",
 ) {
   const url = new URL(window.location.href);
   url.searchParams.set("tab", tab);
   if (tab === "import") url.searchParams.set("import", importSub);
   else url.searchParams.delete("import");
-  if (tab === "tax") url.searchParams.set("tax", taxSub);
-  else url.searchParams.delete("tax");
   url.hash = "";
   const next = `${url.pathname}${url.search}`;
   if (mode === "replace") window.history.replaceState({ tab }, "", next);
   else window.history.pushState({ tab }, "", next);
 }
 
-type TxSortKey =
+export type TxSortKey =
   | "date"
   | "ticker"
   | "exchange"
@@ -107,6 +97,16 @@ type TxSortKey =
   | "source"
   | "quantity"
   | "amount";
+
+type HoldingsSortKey =
+  | "ticker"
+  | "exchange"
+  | "quantity"
+  | "avgCost"
+  | "marketPrice"
+  | "marketValue"
+  | "marketValueAud"
+  | "returnPct";
 
 const PARSERS = [
   { id: "auto", label: "Auto-detect" },
@@ -239,9 +239,35 @@ export function qty(n: number) {
   return n.toLocaleString("en-AU", { maximumFractionDigits: 6 });
 }
 
+/** Unrealised return % (native currency — cost and value in the same currency, FX-neutral). */
+export function ReturnPct({
+  costBase,
+  marketValue,
+}: {
+  costBase: number;
+  marketValue: number | null;
+}) {
+  if (marketValue == null || costBase <= 0) {
+    return <span className="text-gray-500">—</span>;
+  }
+  const pct = ((marketValue - costBase) / costBase) * 100;
+  const positive = pct >= 0;
+  return (
+    <span
+      className={`font-medium ${positive ? "text-emerald-400" : "text-red-400"}`}
+    >
+      {positive ? "+" : ""}
+      {pct.toFixed(1)}%
+    </span>
+  );
+}
+
 export default function App() {
   const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
   const [portfolioId, setPortfolioId] = useState<number | "all">("all");
+  // Bumped inside load() so ImportHistoryPanel refetches after imports/edits
+  // without needing every mutation call site to know about it individually.
+  const [historyTick, setHistoryTick] = useState(0);
   const [brokerFilter, setBrokerFilter] = useState<string>("");
   const [sourceFilter, setSourceFilter] = useState<string>("");
   const [tickerFilter, setTickerFilter] = useState<string>("");
@@ -254,6 +280,11 @@ export default function App() {
   });
   const [selectedTxIds, setSelectedTxIds] = useState<Set<number>>(new Set());
   const [txScrollTop, setTxScrollTop] = useState(0);
+
+  const [holdingsSort, setHoldingsSort] = useState<{
+    key: HoldingsSortKey;
+    dir: "asc" | "desc";
+  }>({ key: "ticker", dir: "asc" });
 
   const [holdings, setHoldings] = useState<Holding[]>([]);
   const [totals, setTotals] = useState<{
@@ -271,6 +302,9 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [yahooStatus, setYahooStatus] = useState<YahooStatus | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  /** Ensures the on-load auto-refresh attempt fires at most once per page load. */
+  const autoRefreshAttemptedRef = useRef(false);
   /** Bump after price refresh so PerformanceChart reloads */
   const [pricesReloadToken, setPricesReloadToken] = useState(0);
   /** Top-level nav — mirrored to `?tab=` (import/tax sub via `?import=` / `?tax=`) */
@@ -279,33 +313,27 @@ export default function App() {
   const [importSub, setImportSubState] = useState<ImportSub>(
     initialNav.importSub,
   );
-  const [taxSub, setTaxSubState] = useState<TaxSub>(initialNav.taxSub);
-
   const setTab = useCallback(
     (next: MainTab) => {
+      // Holdings represents the full unfiltered picture — arriving there
+      // from elsewhere with a leftover ticker/exchange filter (e.g. left
+      // set while browsing Transactions or a ticker page) would otherwise
+      // silently narrow the table, totals, and chart to just one ticker.
+      if (next === "holdings" && tab !== "holdings") {
+        setTickerFilter("");
+        setExchangeFilter("");
+      }
       setTabState(next);
-      writeNavToUrl(next, importSub, taxSub, "push");
+      writeNavToUrl(next, importSub, "push");
     },
-    [importSub, taxSub],
+    [importSub, tab],
   );
 
-  const setImportSub = useCallback(
-    (next: ImportSub) => {
-      setImportSubState(next);
-      setTabState("import");
-      writeNavToUrl("import", next, taxSub, "push");
-    },
-    [taxSub],
-  );
-
-  const setTaxSub = useCallback(
-    (next: TaxSub) => {
-      setTaxSubState(next);
-      setTabState("tax");
-      writeNavToUrl("tax", importSub, next, "push");
-    },
-    [importSub],
-  );
+  const setImportSub = useCallback((next: ImportSub) => {
+    setImportSubState(next);
+    setTabState("import");
+    writeNavToUrl("import", next, "push");
+  }, []);
 
   // Browser back/forward
   useEffect(() => {
@@ -313,15 +341,9 @@ export default function App() {
       const nav = readNavFromUrl();
       setTabState(nav.tab);
       setImportSubState(nav.importSub);
-      setTaxSubState(nav.taxSub);
     };
     // Normalize bare load → always have ?tab= in the address bar
-    writeNavToUrl(
-      initialNav.tab,
-      initialNav.importSub,
-      initialNav.taxSub,
-      "replace",
-    );
+    writeNavToUrl(initialNav.tab, initialNav.importSub, "replace");
     window.addEventListener("popstate", sync);
     return () => window.removeEventListener("popstate", sync);
   }, [initialNav]);
@@ -365,16 +387,46 @@ export default function App() {
     [portfolioId, brokerFilter, sourceFilter, tickerFilter, exchangeFilter],
   );
 
+  const hasActiveFilter = Boolean(
+    brokerFilter ||
+      sourceFilter ||
+      portfolioId !== "all" ||
+      tickerFilter ||
+      exchangeFilter,
+  );
+
+  function clearFilters() {
+    setPortfolioId("all");
+    setBrokerFilter("");
+    setSourceFilter("");
+    setTickerFilter("");
+    setExchangeFilter("");
+  }
+
+  // Ticker + exchange are a compound key everywhere holdings/performance are
+  // looked up (e.g. the ticker page). Typing a bare ticker here — unlike
+  // clicking a Holdings row, which sets both — would otherwise leave a stale
+  // or empty exchange behind, so resolve it from current holdings when the
+  // typed ticker matches one; clear it otherwise (falls back to "any
+  // exchange", same as before for tickers with no current holding).
+  function handleTickerFilterChange(v: string) {
+    const upper = v.toUpperCase();
+    setTickerFilter(upper);
+    const match = holdings.find((h) => h.ticker === upper);
+    setExchangeFilter(match ? match.exchange : "");
+  }
+
   const load = useCallback(async () => {
     setError(null);
     try {
       // Holdings/ledger only — never triggers Yahoo. Prices come from quote_cache.
-      const [ports, meta, h, t, y] = await Promise.all([
+      const [ports, meta, h, t, y, s] = await Promise.all([
         fetchPortfolios(),
         fetchFilterMeta(),
         fetchHoldings(filters),
         fetchTransactions(filters),
         fetchYahooStatus().catch(() => null),
+        fetchSettings().catch(() => null),
       ]);
       setPortfolios(ports);
       setFilterMeta(meta);
@@ -388,6 +440,8 @@ export default function App() {
       setTxs(t);
       setSelectedTxIds(new Set());
       if (y) setYahooStatus(y);
+      if (s) setAppSettings(s.settings);
+      setHistoryTick((n) => n + 1);
 
       if (ports[0]) {
         setPaste((p) =>
@@ -435,6 +489,42 @@ export default function App() {
     return () => window.clearInterval(id);
   }, [yahooStatus?.blockedUntil, yahooStatus?.waitSeconds]);
 
+  // Auto-refresh Yahoo prices once on page load, if enabled in Settings.
+  // Throttled via the server-recorded lastRefreshAt (shared across tabs/
+  // reloads) so repeated browser refreshes can't spam Yahoo faster than the
+  // configured interval. Fires at most once per mount (ref guard) — never
+  // retriggers just because yahooStatus/appSettings update from other calls.
+  useEffect(() => {
+    if (autoRefreshAttemptedRef.current) return;
+    if (!yahooStatus || !appSettings) return;
+    autoRefreshAttemptedRef.current = true;
+
+    const enabled =
+      appSettings.yahoo_refresh_enabled === "1" ||
+      appSettings.yahoo_refresh_enabled === "true";
+    if (!enabled) return;
+    if (yahooStatus.waitSeconds > 0) return; // cooling — skip silently
+
+    const minutes = Number(appSettings.yahoo_auto_refresh_minutes) || 5;
+    const lastAt = yahooStatus.lastRefreshAt
+      ? Date.parse(yahooStatus.lastRefreshAt)
+      : NaN;
+    const due = Number.isNaN(lastAt) || Date.now() - lastAt >= minutes * 60_000;
+    if (!due) return;
+
+    void (async () => {
+      try {
+        const r = await refreshPrices({ force: false, includeHistory: false });
+        if (r.yahoo) setYahooStatus(r.yahoo);
+        setPricesReloadToken((n) => n + 1);
+        await load();
+      } catch (e) {
+        const ye = e as Error & { yahoo?: YahooStatus };
+        if (ye.yahoo) setYahooStatus(ye.yahoo);
+      }
+    })();
+  }, [yahooStatus, appSettings, load]);
+
   const sortedTxs = useMemo(() => {
     const list = [...txs];
     const { key, dir } = txSort;
@@ -471,6 +561,28 @@ export default function App() {
       s.key === key
         ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
         : { key, dir: key === "date" ? "desc" : "asc" },
+    );
+  }
+
+  const sortedHoldings = useMemo(() => {
+    const list = [...holdings];
+    const { key, dir } = holdingsSort;
+    const mul = dir === "asc" ? 1 : -1;
+    list.sort((a, b) => {
+      const av = holdingsSortValue(a, key);
+      const bv = holdingsSortValue(b, key);
+      if (av < bv) return -1 * mul;
+      if (av > bv) return 1 * mul;
+      return a.ticker.localeCompare(b.ticker) * mul;
+    });
+    return list;
+  }, [holdings, holdingsSort]);
+
+  function toggleHoldingsSort(key: HoldingsSortKey) {
+    setHoldingsSort((s) =>
+      s.key === key
+        ? { key, dir: s.dir === "asc" ? "desc" : "asc" }
+        : { key, dir: "asc" },
     );
   }
 
@@ -888,115 +1000,13 @@ export default function App() {
             onClearCooldown={() => void onClearYahooCooldown()}
           />
           <p className="max-w-xs text-right text-[11px] text-gray-500">
-            Page load never calls Yahoo — only this button (or force DRP).
+            {appSettings?.yahoo_refresh_enabled === "1" ||
+            appSettings?.yahoo_refresh_enabled === "true"
+              ? "Auto-refreshes on page load (throttled per Settings) — or hit this button anytime."
+              : "Auto-refresh is off (Settings). Page load only reads cache — use this button to refresh."}
           </p>
         </div>
       </header>
-
-      {/* Filters */}
-      <div className="mb-6 flex flex-wrap items-end gap-3 rounded-xl border border-gray-800 bg-gray-900/50 p-3">
-        <label className="text-sm">
-          <span className="mb-1 block text-xs text-gray-500">Portfolio</span>
-          <select
-            className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm"
-            value={portfolioId === "all" ? "all" : String(portfolioId)}
-            onChange={(e) => {
-              const v = e.target.value;
-              setPortfolioId(v === "all" ? "all" : Number(v));
-            }}
-          >
-            <option value="all">All portfolios</option>
-            {portfolios.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-sm">
-          <span className="mb-1 block text-xs text-gray-500">Broker</span>
-          <select
-            className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm"
-            value={brokerFilter}
-            onChange={(e) => setBrokerFilter(e.target.value)}
-          >
-            <option value="">All brokers</option>
-            {brokerOptions.map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-sm">
-          <span className="mb-1 block text-xs text-gray-500">Source</span>
-          <select
-            className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm"
-            value={sourceFilter}
-            onChange={(e) => setSourceFilter(e.target.value)}
-          >
-            <option value="">All sources</option>
-            {sourceOptions.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label className="text-sm">
-          <span className="mb-1 block text-xs text-gray-500">Ticker</span>
-          <input
-            className="w-28 rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm uppercase"
-            placeholder="All"
-            value={tickerFilter}
-            onChange={(e) => setTickerFilter(e.target.value.toUpperCase())}
-          />
-        </label>
-        {(brokerFilter ||
-          sourceFilter ||
-          portfolioId !== "all" ||
-          tickerFilter ||
-          exchangeFilter) && (
-          <button
-            type="button"
-            className="text-xs text-gray-400 underline hover:text-gray-200"
-            onClick={() => {
-              setPortfolioId("all");
-              setBrokerFilter("");
-              setSourceFilter("");
-              setTickerFilter("");
-              setExchangeFilter("");
-            }}
-          >
-            Clear filters
-          </button>
-        )}
-        <div className="ml-auto">
-          <ExportBar filters={filters} />
-        </div>
-      </div>
-
-      <div className="mb-6 grid gap-3 sm:grid-cols-3">
-        <Stat label="Cost base (AUD)" value={money(totals.costBaseAud)} />
-        <Stat label="Market value (AUD)" value={money(totals.marketValueAud)} />
-        <Stat
-          label="Unrealised (AUD)"
-          value={money(totals.unrealisedAud)}
-          accent={
-            totals.unrealisedAud == null
-              ? undefined
-              : totals.unrealisedAud >= 0
-                ? "up"
-                : "down"
-          }
-        />
-      </div>
-
-      {fx["AUDUSD=X"] != null && (
-        <p className="mb-4 text-xs text-gray-500">
-          FX AUDUSD=X {fx["AUDUSD=X"].toFixed(4)} (USD per 1 AUD)
-        </p>
-      )}
 
       <nav className="mb-4 flex flex-wrap gap-1 rounded-xl border border-gray-800 bg-gray-900/60 p-1">
         {(
@@ -1004,7 +1014,6 @@ export default function App() {
             ["holdings", "Holdings"],
             ["transactions", "Transactions"],
             ["import", "Import"],
-            ["tax", "Tax"],
             ["planner", "Planner"],
             ["settings", "Settings"],
           ] as const
@@ -1032,6 +1041,44 @@ export default function App() {
 
       {tab === "holdings" && (
         <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Stat label="Cost base (AUD)" value={money(totals.costBaseAud)} />
+            <Stat
+              label="Market value (AUD)"
+              value={money(totals.marketValueAud)}
+            />
+            <Stat
+              label="Unrealised (AUD)"
+              value={money(totals.unrealisedAud)}
+              accent={
+                totals.unrealisedAud == null
+                  ? undefined
+                  : totals.unrealisedAud >= 0
+                    ? "up"
+                    : "down"
+              }
+            />
+          </div>
+          {fx["AUDUSD=X"] != null && (
+            <p className="text-xs text-gray-500">
+              FX AUDUSD=X {fx["AUDUSD=X"].toFixed(4)} (USD per 1 AUD)
+            </p>
+          )}
+          <FilterBar
+            portfolios={portfolios}
+            portfolioId={portfolioId}
+            onPortfolioChange={setPortfolioId}
+            brokerFilter={brokerFilter}
+            onBrokerChange={setBrokerFilter}
+            brokerOptions={brokerOptions}
+            sourceFilter={sourceFilter}
+            onSourceChange={setSourceFilter}
+            sourceOptions={sourceOptions}
+            tickerFilter={tickerFilter}
+            onTickerChange={handleTickerFilterChange}
+            hasActiveFilter={hasActiveFilter}
+            onClear={clearFilters}
+          />
           <Panel title={`Holdings · ${selectedPortfolioLabel}`}>
             <p className="mb-3 text-xs text-gray-500">
               Click a row to open that ticker’s page.
@@ -1043,17 +1090,58 @@ export default function App() {
                 <table className="w-full min-w-[800px] text-left text-sm">
                   <thead className="sticky top-0 z-10 bg-gray-900 text-xs uppercase tracking-wide text-gray-500 shadow">
                     <tr>
-                      <th className="px-3 py-2.5 font-medium">Ticker</th>
-                      <th className="px-3 py-2.5 font-medium">Mkt</th>
-                      <th className="px-3 py-2.5 font-medium">Units</th>
-                      <th className="px-3 py-2.5 font-medium">Avg cost</th>
-                      <th className="px-3 py-2.5 font-medium">Price</th>
-                      <th className="px-3 py-2.5 font-medium">Value</th>
-                      <th className="px-3 py-2.5 font-medium">Value AUD</th>
+                      <SortTh
+                        label="Ticker"
+                        active={holdingsSort.key === "ticker"}
+                        dir={holdingsSort.dir}
+                        onClick={() => toggleHoldingsSort("ticker")}
+                      />
+                      <SortTh
+                        label="Mkt"
+                        active={holdingsSort.key === "exchange"}
+                        dir={holdingsSort.dir}
+                        onClick={() => toggleHoldingsSort("exchange")}
+                      />
+                      <SortTh
+                        label="Units"
+                        active={holdingsSort.key === "quantity"}
+                        dir={holdingsSort.dir}
+                        onClick={() => toggleHoldingsSort("quantity")}
+                      />
+                      <SortTh
+                        label="Avg cost"
+                        active={holdingsSort.key === "avgCost"}
+                        dir={holdingsSort.dir}
+                        onClick={() => toggleHoldingsSort("avgCost")}
+                      />
+                      <SortTh
+                        label="Price"
+                        active={holdingsSort.key === "marketPrice"}
+                        dir={holdingsSort.dir}
+                        onClick={() => toggleHoldingsSort("marketPrice")}
+                      />
+                      <SortTh
+                        label="Value"
+                        active={holdingsSort.key === "marketValue"}
+                        dir={holdingsSort.dir}
+                        onClick={() => toggleHoldingsSort("marketValue")}
+                      />
+                      <SortTh
+                        label="Value AUD"
+                        active={holdingsSort.key === "marketValueAud"}
+                        dir={holdingsSort.dir}
+                        onClick={() => toggleHoldingsSort("marketValueAud")}
+                      />
+                      <SortTh
+                        label="Return"
+                        active={holdingsSort.key === "returnPct"}
+                        dir={holdingsSort.dir}
+                        onClick={() => toggleHoldingsSort("returnPct")}
+                      />
                     </tr>
                   </thead>
                   <tbody>
-                    {holdings.map((h) => (
+                    {sortedHoldings.map((h) => (
                       <tr
                         key={`${h.exchange}:${h.ticker}`}
                         className="cursor-pointer border-t border-gray-800/80 hover:bg-emerald-500/10"
@@ -1083,6 +1171,12 @@ export default function App() {
                         <td className="px-3 py-2.5 tabular-nums">
                           {money(h.marketValueAud)}
                         </td>
+                        <td className="px-3 py-2.5 tabular-nums">
+                          <ReturnPct
+                            costBase={h.costBase}
+                            marketValue={h.marketValue}
+                          />
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1110,201 +1204,267 @@ export default function App() {
               setTab("transactions");
               setTxScrollTop(0);
             }}
+            onChanged={() => void load()}
+            filterBar={
+              <FilterBar
+                portfolios={portfolios}
+                portfolioId={portfolioId}
+                onPortfolioChange={setPortfolioId}
+                brokerFilter={brokerFilter}
+                onBrokerChange={setBrokerFilter}
+                brokerOptions={brokerOptions}
+                sourceFilter={sourceFilter}
+                onSourceChange={setSourceFilter}
+                sourceOptions={sourceOptions}
+                tickerFilter={tickerFilter}
+                onTickerChange={handleTickerFilterChange}
+                hasActiveFilter={hasActiveFilter}
+                onClear={clearFilters}
+              />
+            }
           />
         ) : (
-          <Panel title="No ticker selected">
-            <Empty hint="Open a ticker page by clicking a row on Holdings." />
-          </Panel>
+          <div className="space-y-4">
+            <FilterBar
+              portfolios={portfolios}
+              portfolioId={portfolioId}
+              onPortfolioChange={setPortfolioId}
+              brokerFilter={brokerFilter}
+              onBrokerChange={setBrokerFilter}
+              brokerOptions={brokerOptions}
+              sourceFilter={sourceFilter}
+              onSourceChange={setSourceFilter}
+              sourceOptions={sourceOptions}
+              tickerFilter={tickerFilter}
+              onTickerChange={handleTickerFilterChange}
+              hasActiveFilter={hasActiveFilter}
+              onClear={clearFilters}
+            />
+            <Panel title="No ticker selected">
+              <Empty hint="Open a ticker page by clicking a row on Holdings." />
+            </Panel>
+          </div>
         ))}
 
       {tab === "transactions" && (
-        <Panel
-          title={
-            tickerFilter
-              ? `Ledger · ${tickerFilter}${exchangeFilter ? ` (${exchangeFilter})` : ""}`
-              : `Ledger · ${selectedPortfolioLabel}`
-          }
-        >
-          <div className="mb-3 flex flex-wrap items-center gap-2">
-            {tickerFilter && (
+        <div className="space-y-4">
+          <FilterBar
+            portfolios={portfolios}
+            portfolioId={portfolioId}
+            onPortfolioChange={setPortfolioId}
+            brokerFilter={brokerFilter}
+            onBrokerChange={setBrokerFilter}
+            brokerOptions={brokerOptions}
+            sourceFilter={sourceFilter}
+            onSourceChange={setSourceFilter}
+            sourceOptions={sourceOptions}
+            tickerFilter={tickerFilter}
+            onTickerChange={handleTickerFilterChange}
+            hasActiveFilter={hasActiveFilter}
+            onClear={clearFilters}
+          />
+          <Panel
+            title={
+              tickerFilter
+                ? `Ledger · ${tickerFilter}${exchangeFilter ? ` (${exchangeFilter})` : ""}`
+                : `Ledger · ${selectedPortfolioLabel}`
+            }
+          >
+            <div className="mb-3 flex flex-wrap items-center gap-2">
+              {tickerFilter && (
+                <button
+                  type="button"
+                  className="rounded-md bg-emerald-500/15 px-2 py-1 text-xs text-emerald-300"
+                  onClick={() => {
+                    setTickerFilter("");
+                    setExchangeFilter("");
+                  }}
+                >
+                  Clear ticker filter ×
+                </button>
+              )}
+              <span className="text-xs text-gray-500">
+                {sortedTxs.length} row{sortedTxs.length === 1 ? "" : "s"}
+                {selectedTxIds.size > 0
+                  ? ` · ${selectedTxIds.size} selected`
+                  : ""}
+              </span>
+              <div className="flex-1" />
               <button
                 type="button"
-                className="rounded-md bg-emerald-500/15 px-2 py-1 text-xs text-emerald-300"
-                onClick={() => {
-                  setTickerFilter("");
-                  setExchangeFilter("");
-                }}
+                disabled={busy || selectedTxIds.size === 0}
+                onClick={() => void onDeleteSelected()}
+                className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-1.5 text-xs text-red-200 hover:bg-red-900/40 disabled:opacity-40"
               >
-                Clear ticker filter ×
+                Delete selected
               </button>
-            )}
-            <span className="text-xs text-gray-500">
-              {sortedTxs.length} row{sortedTxs.length === 1 ? "" : "s"}
-              {selectedTxIds.size > 0
-                ? ` · ${selectedTxIds.size} selected`
-                : ""}
-            </span>
-            <div className="flex-1" />
-            <button
-              type="button"
-              disabled={busy || selectedTxIds.size === 0}
-              onClick={() => void onDeleteSelected()}
-              className="rounded-lg border border-red-900/60 bg-red-950/40 px-3 py-1.5 text-xs text-red-200 hover:bg-red-900/40 disabled:opacity-40"
-            >
-              Delete selected
-            </button>
-          </div>
-
-          {sortedTxs.length === 0 ? (
-            <Empty hint="No transactions for current filters." />
-          ) : (
-            <div
-              className="overflow-auto rounded-lg border border-gray-800"
-              style={{ height: TX_VIEW_H }}
-              onScroll={(e) => setTxScrollTop(e.currentTarget.scrollTop)}
-            >
-              <table className="w-full min-w-[1000px] table-fixed text-left text-sm">
-                <thead className="sticky top-0 z-10 bg-gray-900 text-xs uppercase tracking-wide text-gray-500 shadow">
-                  <tr>
-                    <th className="w-10 px-2 py-2.5">
-                      <input
-                        type="checkbox"
-                        checked={
-                          sortedTxs.length > 0 &&
-                          sortedTxs.every((t) => selectedTxIds.has(t.id))
-                        }
-                        onChange={toggleSelectAllVisible}
-                        aria-label="Select all"
-                      />
-                    </th>
-                    <SortTh
-                      label="Date"
-                      active={txSort.key === "date"}
-                      dir={txSort.dir}
-                      onClick={() => toggleTxSort("date")}
-                    />
-                    <SortTh
-                      label="Ticker"
-                      active={txSort.key === "ticker"}
-                      dir={txSort.dir}
-                      onClick={() => toggleTxSort("ticker")}
-                    />
-                    <SortTh
-                      label="Mkt"
-                      active={txSort.key === "exchange"}
-                      dir={txSort.dir}
-                      onClick={() => toggleTxSort("exchange")}
-                    />
-                    <SortTh
-                      label="Type"
-                      active={txSort.key === "type"}
-                      dir={txSort.dir}
-                      onClick={() => toggleTxSort("type")}
-                    />
-                    <SortTh
-                      label="Broker"
-                      active={txSort.key === "broker"}
-                      dir={txSort.dir}
-                      onClick={() => toggleTxSort("broker")}
-                    />
-                    <SortTh
-                      label="Source"
-                      active={txSort.key === "source"}
-                      dir={txSort.dir}
-                      onClick={() => toggleTxSort("source")}
-                    />
-                    <SortTh
-                      label="Qty"
-                      active={txSort.key === "quantity"}
-                      dir={txSort.dir}
-                      onClick={() => toggleTxSort("quantity")}
-                    />
-                    <SortTh
-                      label="Amount"
-                      active={txSort.key === "amount"}
-                      dir={txSort.dir}
-                      onClick={() => toggleTxSort("amount")}
-                    />
-                  </tr>
-                </thead>
-                <tbody>
-                  {txVirtual.padTop > 0 && (
-                    <tr aria-hidden>
-                      <td
-                        colSpan={9}
-                        style={{ height: txVirtual.padTop, padding: 0 }}
-                      />
-                    </tr>
-                  )}
-                  {txVirtual.rows.map((t) => (
-                    <tr
-                      key={t.id}
-                      className={`border-t border-gray-800/80 ${
-                        selectedTxIds.has(t.id) ? "bg-sky-500/10" : ""
-                      }`}
-                      style={{ height: TX_ROW_H }}
-                    >
-                      <td className="px-2 py-1">
+            </div>
+  
+            {sortedTxs.length === 0 ? (
+              <Empty hint="No transactions for current filters." />
+            ) : (
+              <div
+                className="overflow-auto rounded-lg border border-gray-800"
+                style={{ height: TX_VIEW_H }}
+                onScroll={(e) => setTxScrollTop(e.currentTarget.scrollTop)}
+              >
+                <table className="w-full min-w-[1000px] table-fixed text-left text-sm">
+                  <thead className="sticky top-0 z-10 bg-gray-900 text-xs uppercase tracking-wide text-gray-500 shadow">
+                    <tr>
+                      <th className="w-10 px-2 py-2.5">
                         <input
                           type="checkbox"
-                          checked={selectedTxIds.has(t.id)}
-                          onChange={() => toggleSelectTx(t.id)}
-                          aria-label={`Select ${t.id}`}
+                          checked={
+                            sortedTxs.length > 0 &&
+                            sortedTxs.every((t) => selectedTxIds.has(t.id))
+                          }
+                          onChange={toggleSelectAllVisible}
+                          aria-label="Select all"
                         />
-                      </td>
-                      <td className="px-2 py-1 tabular-nums text-gray-300">
-                        {t.date}
-                      </td>
-                      <td className="px-2 py-1 font-medium">{t.ticker}</td>
-                      <td className="px-2 py-1">
-                        <ExchangeBadge
-                          exchange={t.exchange}
-                          currency={t.currency}
-                        />
-                      </td>
-                      <td className="px-2 py-1">
-                        <TypeBadge type={t.type} />
-                      </td>
-                      <td className="px-2 py-1 text-xs text-gray-400">
-                        {t.broker || t.custody || "—"}
-                      </td>
-                      <td className="max-w-[100px] truncate px-2 py-1 text-xs text-gray-500">
-                        {t.source || "—"}
-                      </td>
-                      <td className="px-2 py-1 tabular-nums">
-                        {qty(t.quantity)}
-                      </td>
-                      <td className="px-2 py-1 tabular-nums">
-                        {money(t.amount, t.currency, true)}
-                      </td>
-                    </tr>
-                  ))}
-                  {txVirtual.padBottom > 0 && (
-                    <tr aria-hidden>
-                      <td
-                        colSpan={9}
-                        style={{ height: txVirtual.padBottom, padding: 0 }}
+                      </th>
+                      <SortTh
+                        label="Date"
+                        active={txSort.key === "date"}
+                        dir={txSort.dir}
+                        onClick={() => toggleTxSort("date")}
+                      />
+                      <SortTh
+                        label="Ticker"
+                        active={txSort.key === "ticker"}
+                        dir={txSort.dir}
+                        onClick={() => toggleTxSort("ticker")}
+                      />
+                      <SortTh
+                        label="Mkt"
+                        active={txSort.key === "exchange"}
+                        dir={txSort.dir}
+                        onClick={() => toggleTxSort("exchange")}
+                      />
+                      <SortTh
+                        label="Type"
+                        active={txSort.key === "type"}
+                        dir={txSort.dir}
+                        onClick={() => toggleTxSort("type")}
+                      />
+                      <SortTh
+                        label="Broker"
+                        active={txSort.key === "broker"}
+                        dir={txSort.dir}
+                        onClick={() => toggleTxSort("broker")}
+                      />
+                      <SortTh
+                        label="Source"
+                        active={txSort.key === "source"}
+                        dir={txSort.dir}
+                        onClick={() => toggleTxSort("source")}
+                      />
+                      <SortTh
+                        label="Qty"
+                        active={txSort.key === "quantity"}
+                        dir={txSort.dir}
+                        onClick={() => toggleTxSort("quantity")}
+                      />
+                      <SortTh
+                        label="Amount"
+                        active={txSort.key === "amount"}
+                        dir={txSort.dir}
+                        onClick={() => toggleTxSort("amount")}
                       />
                     </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </Panel>
+                  </thead>
+                  <tbody>
+                    {txVirtual.padTop > 0 && (
+                      <tr aria-hidden>
+                        <td
+                          colSpan={9}
+                          style={{ height: txVirtual.padTop, padding: 0 }}
+                        />
+                      </tr>
+                    )}
+                    {txVirtual.rows.map((t) => (
+                      <tr
+                        key={t.id}
+                        className={`border-t border-gray-800/80 ${
+                          selectedTxIds.has(t.id) ? "bg-sky-500/10" : ""
+                        }`}
+                        style={{ height: TX_ROW_H }}
+                      >
+                        <td className="px-2 py-1">
+                          <input
+                            type="checkbox"
+                            checked={selectedTxIds.has(t.id)}
+                            onChange={() => toggleSelectTx(t.id)}
+                            aria-label={`Select ${t.id}`}
+                          />
+                        </td>
+                        <td className="px-2 py-1 tabular-nums text-gray-300">
+                          {t.date}
+                        </td>
+                        <td className="px-2 py-1 font-medium">{t.ticker}</td>
+                        <td className="px-2 py-1">
+                          <ExchangeBadge
+                            exchange={t.exchange}
+                            currency={t.currency}
+                          />
+                        </td>
+                        <td className="px-2 py-1">
+                          <TypeBadge type={t.type} />
+                        </td>
+                        <td className="px-2 py-1 text-xs text-gray-400">
+                          {t.broker || t.custody || "—"}
+                        </td>
+                        <td className="max-w-[100px] truncate px-2 py-1 text-xs text-gray-500">
+                          {t.source || "—"}
+                        </td>
+                        <td className="px-2 py-1 tabular-nums">
+                          {qty(t.quantity)}
+                        </td>
+                        <td className="px-2 py-1 tabular-nums">
+                          {money(t.amount, t.currency, true)}
+                        </td>
+                      </tr>
+                    ))}
+                    {txVirtual.padBottom > 0 && (
+                      <tr aria-hidden>
+                        <td
+                          colSpan={9}
+                          style={{ height: txVirtual.padBottom, padding: 0 }}
+                        />
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </Panel>
+        </div>
       )}
 
       {tab === "import" && (
         <div className="space-y-4">
-          <SubNav<"file" | "paste" | "manual">
+          <SubNav<"file" | "paste" | "stakeDrp" | "manual">
             options={[
               ["file", "Import file"],
               ["paste", "Paste Sharesight"],
+              ["stakeDrp", "Stake DRP"],
               ["manual", "Add trade"],
             ]}
             value={importSub}
             onChange={setImportSub}
           />
+
+          {importSub === "file" && (
+            <ImportHistoryPanel portfolioId={portfolioId} refreshSignal={historyTick} />
+          )}
+
+          {importSub === "stakeDrp" && (
+            <StakeDrpPanel
+              portfolioId={portfolioId}
+              portfolios={portfolios}
+              onPortfolioChange={setPortfolioId}
+              onCommitted={() => void load()}
+            />
+          )}
 
           {importSub === "file" && (
             <Panel title="Import broker / Sharesight file">
@@ -1845,26 +2005,6 @@ export default function App() {
         </div>
       )}
 
-      {tab === "tax" && (
-        <div className="space-y-4">
-          <SubNav<"profiles" | "drp">
-            options={[
-              ["profiles", "Tax profiles"],
-              ["drp", "DRP check"],
-            ]}
-            value={taxSub}
-            onChange={setTaxSub}
-          />
-          {taxSub === "profiles" && <TaxSettingsPanel />}
-          {taxSub === "drp" && (
-            <DrpCheckPanel
-              portfolioId={portfolioId === "all" ? undefined : portfolioId}
-              holdings={holdings}
-            />
-          )}
-        </div>
-      )}
-
       {tab === "planner" && <PlannerPanel />}
 
       {tab === "settings" && (
@@ -1872,8 +2012,8 @@ export default function App() {
           <Panel title="Portfolios">
             <p className="mb-4 text-sm text-gray-400">
               A portfolio is an ownership book (you, partner, SMSF). Each can
-              include trades from many brokers. Switch the active book with the
-              filter bar above.
+              include trades from many brokers. Switch the active book with
+              the Portfolio filter on Holdings or Transactions.
             </p>
             <ul className="mb-4 space-y-2 text-sm">
               {portfolios.map((p) => (
@@ -1902,6 +2042,17 @@ export default function App() {
                 Create portfolio
               </button>
             </div>
+          </Panel>
+          <TaxSettingsPanel />
+          <Panel title="Export">
+            <p className="mb-3 text-xs text-gray-500">
+              Transactions CSV respects whatever Portfolio/Broker/Source/
+              Ticker filter is currently set on Holdings or Transactions.
+              Backup DB is always the full database, unfiltered. Restore DB
+              replaces ALL current data with an uploaded backup file — a
+              safety copy of the current database is kept on disk first.
+            </p>
+            <ExportBar filters={filters} />
           </Panel>
           <SettingsPanel />
         </div>
@@ -2008,7 +2159,7 @@ function YahooStatusBadge({
   );
 }
 
-function sortValue(t: TxRow, key: TxSortKey): string | number {
+export function sortValue(t: TxRow, key: TxSortKey): string | number {
   switch (key) {
     case "date":
       return t.date;
@@ -2031,7 +2182,32 @@ function sortValue(t: TxRow, key: TxSortKey): string | number {
   }
 }
 
-function SortTh({
+function holdingsSortValue(h: Holding, key: HoldingsSortKey): string | number {
+  switch (key) {
+    case "ticker":
+      return h.ticker;
+    case "exchange":
+      return h.exchange;
+    case "quantity":
+      return h.quantity;
+    case "avgCost":
+      return h.avgCost;
+    case "marketPrice":
+      return h.marketPrice ?? -Infinity;
+    case "marketValue":
+      return h.marketValue ?? -Infinity;
+    case "marketValueAud":
+      return h.marketValueAud ?? -Infinity;
+    case "returnPct":
+      return h.costBase > 0 && h.marketValue != null
+        ? (h.marketValue - h.costBase) / h.costBase
+        : -Infinity;
+    default:
+      return h.ticker;
+  }
+}
+
+export function SortTh({
   label,
   active,
   dir,
@@ -2096,6 +2272,107 @@ function Stat({
       >
         {value}
       </p>
+    </div>
+  );
+}
+
+function FilterBar({
+  portfolios,
+  portfolioId,
+  onPortfolioChange,
+  brokerFilter,
+  onBrokerChange,
+  brokerOptions,
+  sourceFilter,
+  onSourceChange,
+  sourceOptions,
+  tickerFilter,
+  onTickerChange,
+  hasActiveFilter,
+  onClear,
+}: {
+  portfolios: Portfolio[];
+  portfolioId: number | "all";
+  onPortfolioChange: (v: number | "all") => void;
+  brokerFilter: string;
+  onBrokerChange: (v: string) => void;
+  brokerOptions: string[];
+  sourceFilter: string;
+  onSourceChange: (v: string) => void;
+  sourceOptions: string[];
+  tickerFilter: string;
+  onTickerChange: (v: string) => void;
+  hasActiveFilter: boolean;
+  onClear: () => void;
+}) {
+  return (
+    <div className="flex flex-wrap items-end gap-3 rounded-xl border border-gray-800 bg-gray-900/50 p-3">
+      <label className="text-sm">
+        <span className="mb-1 block text-xs text-gray-500">Portfolio</span>
+        <select
+          className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm"
+          value={portfolioId === "all" ? "all" : String(portfolioId)}
+          onChange={(e) => {
+            const v = e.target.value;
+            onPortfolioChange(v === "all" ? "all" : Number(v));
+          }}
+        >
+          <option value="all">All portfolios</option>
+          {portfolios.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.name}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="text-sm">
+        <span className="mb-1 block text-xs text-gray-500">Broker</span>
+        <select
+          className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm"
+          value={brokerFilter}
+          onChange={(e) => onBrokerChange(e.target.value)}
+        >
+          <option value="">All brokers</option>
+          {brokerOptions.map((b) => (
+            <option key={b} value={b}>
+              {b}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="text-sm">
+        <span className="mb-1 block text-xs text-gray-500">Source</span>
+        <select
+          className="rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm"
+          value={sourceFilter}
+          onChange={(e) => onSourceChange(e.target.value)}
+        >
+          <option value="">All sources</option>
+          {sourceOptions.map((s) => (
+            <option key={s} value={s}>
+              {s}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label className="text-sm">
+        <span className="mb-1 block text-xs text-gray-500">Ticker</span>
+        <input
+          className="w-28 rounded-lg border border-gray-700 bg-gray-950 px-3 py-2 text-sm uppercase"
+          placeholder="All"
+          value={tickerFilter}
+          onChange={(e) => onTickerChange(e.target.value.toUpperCase())}
+        />
+      </label>
+      {hasActiveFilter && (
+        <button
+          type="button"
+          className="ml-auto text-xs text-gray-400 underline hover:text-gray-200"
+          onClick={onClear}
+        >
+          Clear filters
+        </button>
+      )}
     </div>
   );
 }
