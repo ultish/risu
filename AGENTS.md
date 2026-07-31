@@ -24,7 +24,7 @@ Primary holdings for this install (do not simplify the codebase down to only the
 - For performance MTM: ASX/Betashares → AUD (no FX); US → USD price × `AUDUSD` history → AUD. Cost from ledger currency as stored.
 - FX history cache priority in practice: **AUDUSD** (and any other pair only if a foreign quote currency appears).
 
-Read **README.md** for product intro, install, and dev instructions. Read **docs/import-sources.md** for broker/Sharesight import reality. Read **docs/import-layouts-plan.md** for phased multi-file / PDF / Stake XLSX import work (Stake = XLSX only; no Stake PDF).
+Read **README.md** for product intro, install, dev instructions, and the supported import formats table.
 
 ## Working rules
 
@@ -109,7 +109,7 @@ apps/web          UI (Planner, holdings, settings, …)
 apps/api          Hono routes, SQLite, Yahoo gate, static serve
 packages/core     parsers, holdings, tax, planner engine, Yahoo client
 fixtures/csv      sample broker files
-docs/             import guides + risu-icon.png
+assets/           risu-icon.png
 README.md         product intro, install, dev
 CHANGELOG.md      user-facing history
 AGENTS.md         this file

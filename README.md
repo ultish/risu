@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/risu-icon.png" alt="Risu" width="128" height="128" />
+  <img src="assets/risu-icon.png" alt="Risu" width="128" height="128" />
 </p>
 
 # Risu
@@ -30,7 +30,7 @@ Import your trades, refresh prices when you choose, and run “what if?” scena
 ### See your portfolio clearly
 
 - **Separate portfolios** — e.g. yours and a partner’s — each with its own trades
-- **Import from real exports** — CommSec, Pocket, Selfwealth, Stake, Betashares Direct, or Sharesight (file or paste), plus **annual statement PDFs** (Selfwealth, Betashares Direct, Computershare, Link/MUFG). Details: [import guide](./docs/import-sources.md)
+- **Import from real exports** — see [supported import formats](#supported-import-formats) below
 - **Add a trade by hand** when a file doesn’t cover it
 - **Holdings at a glance** — units, cost base, last price, unrealised gain/loss in **AUD**; click a row for a **per-ticker detail page**
 - **Full trade history** — search-friendly ledger; export to CSV when you need a copy
@@ -40,7 +40,7 @@ Import your trades, refresh prices when you choose, and run “what if?” scena
 
 ### Prices without the noise
 
-- **You decide when to refresh** — opening the app never hammers market sites
+- **You decide when to refresh** — by default, opening the app never hits market sites; an optional auto-refresh (Settings, throttled with a cool-down) can check on page load if you want it
 - **ASX and US prices** from free public sources (Yahoo when it works; other sources when it doesn’t)
 - **US holdings converted to AUD** using historical exchange rates, so old months aren’t valued with today’s dollar
 - **Stock splits handled sensibly** so long-term value doesn’t look broken after a 5-for-1
@@ -58,6 +58,23 @@ Import your trades, refresh prices when you choose, and run “what if?” scena
 - Data lives **only on your machine**
 - No account, no ads, no syncing your holdings to a SaaS
 - You export or back up when **you** want a copy
+
+---
+
+## Supported import formats
+
+| Broker / source | Format |
+|---|---|
+| **Sharesight** | All Trades Report (file export or paste — the free-plan-friendly path is per-holding "All trades & adjustments" → copy → Paste Sharesight tab) |
+| **CommSec** | Confirmations CSV |
+| **Selfwealth** | Report CSV, or Annual Statement PDF (AU domestic + International/USA) |
+| **Stake** | Investment Activity / Investment Income XLSX (per FY, under Tax & Documents) — no Stake PDF support |
+| **Betashares Direct** | Annual Statement PDF |
+| **Computershare** (Vanguard VGS, iShares IOZ, …) | Annual Statement PDF — set custody per file, it isn't auto-detected |
+| **Link/MUFG** (Betashares NDQ, …) | Annual Statement PDF — set custody per file, it isn't auto-detected |
+| Anything else | Add trades by hand, or paste a CSV that matches the generic column layout |
+
+Multi-file drag-drop with auto-detect and per-file overrides lives under Import → Import file. Issuer PDFs never fabricate a cost base — if the statement doesn't disclose a price, the row imports as a transfer with a warning instead of a guessed value.
 
 ---
 
@@ -125,7 +142,7 @@ apps/web          React UI (Vite + Tailwind)
 apps/api          Hono + better-sqlite3 + static serve of web dist
 packages/core     Parsers, holdings, performance, tax, planner, Yahoo/FX clients
 fixtures/csv      Sample broker files
-docs/             Import guides + app icon
+assets/           App icon
 ```
 
 Domain logic lives in **`@yields/core`**. Keep the API thin; UI talks to `/api` or pure helpers.
