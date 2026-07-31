@@ -4,7 +4,7 @@ import {
   summarizeFyEndSnapshots,
   summarizeRealisedGains,
   type ParsedTransaction,
-} from "@yields/core";
+} from "@risu/core";
 import type { Context } from "hono";
 import type Database from "better-sqlite3";
 import { loadFxHistory, loadPriceSeries } from "./performance.js";

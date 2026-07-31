@@ -33,7 +33,7 @@ import {
   type ParsedTransaction,
   type Scenario,
   type TransactionType,
-} from "@yields/core";
+} from "@risu/core";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import fs from "node:fs";

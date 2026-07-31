@@ -4,7 +4,7 @@
  * it when present, otherwise escalate heuristics.
  */
 import type Database from "better-sqlite3";
-import { isYahooHttpError } from "@yields/core";
+import { isYahooHttpError } from "@risu/core";
 
 const KEY_BLOCKED_UNTIL = "yahoo_blocked_until";
 const KEY_LAST_ERROR = "yahoo_last_error";

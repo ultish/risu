@@ -1,5 +1,5 @@
 {
-  "name": "@yields/api",
+  "name": "@risu/api",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.14.1",
-    "@yields/core": "workspace:*",
+    "@risu/core": "workspace:*",
     "better-sqlite3": "^11.9.0",
     "hono": "^4.7.5",
     "playwright": "^1.48.0",

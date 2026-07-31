@@ -96,7 +96,7 @@ corepack enable
 git clone https://github.com/ultish/risu.git
 cd risu
 pnpm install
-pnpm --filter @yields/core build
+pnpm --filter @risu/core build
 ```
 
 ### Run (dev)
@@ -145,7 +145,7 @@ fixtures/csv      Sample broker files
 assets/           App icon
 ```
 
-Domain logic lives in **`@yields/core`**. Keep the API thin; UI talks to `/api` or pure helpers.
+Domain logic lives in **`@risu/core`**. Keep the API thin; UI talks to `/api` or pure helpers.
 
 ### Commands
 
@@ -153,14 +153,14 @@ Domain logic lives in **`@yields/core`**. Keep the API thin; UI talks to `/api` 
 |---------|------|
 | `pnpm dev` | API + web in parallel |
 | `pnpm dev:api` / `pnpm dev:web` | One side only |
-| `pnpm --filter @yields/core build` | Compile core (`tsc` → dist) — **required** after core changes the API imports |
-| `pnpm --filter @yields/core test` | Vitest (parsers, tax, splits, planner, …) |
+| `pnpm --filter @risu/core build` | Compile core (`tsc` → dist) — **required** after core changes the API imports |
+| `pnpm --filter @risu/core test` | Vitest (parsers, tax, splits, planner, …) |
 | `pnpm build` | Build all workspace packages |
 | `pnpm typecheck` | Typecheck all packages |
 
 ### Workflow tips
 
-1. Change **`packages/core`** → `pnpm --filter @yields/core build` (or `cd packages/core && npm run build`) before relying on the API.
+1. Change **`packages/core`** → `pnpm --filter @risu/core build` (or `cd packages/core && npm run build`) before relying on the API.
 2. After user-visible changes, update **[CHANGELOG.md](./CHANGELOG.md)** under `[Unreleased]`.
 3. Agent/repo conventions: **[AGENTS.md](./AGENTS.md)**.
 4. Do not commit `data/yields.db` or personal broker dumps.

@@ -28,7 +28,7 @@ Read **README.md** for product intro, install, dev instructions, and the support
 
 ## Working rules
 
-1. **Domain logic lives in `@yields/core`** — keep API thin; UI calls API or pure helpers.
+1. **Domain logic lives in `@risu/core`** — keep API thin; UI calls API or pure helpers.
 2. **Ledger is source of truth** for units/cost base. Yahoo is optional cache for prices/dividends.
 3. **Do not invent DRP lots** from market data — DRP check is suggestions only.
 4. Prefer small, reversible local edits. Confirm before destructive git or shared remotes unless the user asked.

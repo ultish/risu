@@ -13,9 +13,9 @@ RUN pnpm install --frozen-lockfile || pnpm install
 
 FROM deps AS build
 COPY . .
-RUN pnpm --filter @yields/core build \
- && pnpm --filter @yields/api build \
- && pnpm --filter @yields/web build
+RUN pnpm --filter @risu/core build \
+ && pnpm --filter @risu/api build \
+ && pnpm --filter @risu/web build
 
 FROM base AS runtime
 ENV NODE_ENV=production

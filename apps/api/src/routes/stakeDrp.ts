@@ -1,4 +1,4 @@
-import { analyzeStakeDrp } from "@yields/core";
+import { analyzeStakeDrp } from "@risu/core";
 import type { Context } from "hono";
 import type Database from "better-sqlite3";
 

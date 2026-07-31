@@ -2,7 +2,7 @@
  * GainsChart — realised vs unrealised gain per AU financial year (AUD).
  * Realised: proceeds − FIFO cost base on actual sells. Unrealised: current
  * mark-to-market − cost base at each FY's last available snapshot. Nominal,
- * tax-agnostic (see GainsByFy in @yields/core) — for "how much of my return
+ * tax-agnostic (see GainsByFy in @risu/core) — for "how much of my return
  * is locked in" at a glance, not a tax figure.
  *
  * Grouped (not stacked) bars: the two are different kinds of gain, not

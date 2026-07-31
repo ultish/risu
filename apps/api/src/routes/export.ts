@@ -1,4 +1,4 @@
-import { transactionsToCsv } from "@yields/core";
+import { transactionsToCsv } from "@risu/core";
 import type { Context } from "hono";
 import type Database from "better-sqlite3";
 import fs from "node:fs";

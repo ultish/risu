@@ -1,12 +1,12 @@
 {
-  "name": "yields",
+  "name": "risu",
   "version": "0.1.0",
   "private": true,
   "description": "AU investment portfolio tracker + planner",
   "scripts": {
-    "dev": "pnpm -r --parallel --filter @yields/api --filter @yields/web dev",
-    "dev:api": "pnpm --filter @yields/api dev",
-    "dev:web": "pnpm --filter @yields/web dev",
+    "dev": "pnpm -r --parallel --filter @risu/api --filter @risu/web dev",
+    "dev:api": "pnpm --filter @risu/api dev",
+    "dev:web": "pnpm --filter @risu/web dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
     "typecheck": "pnpm -r typecheck"

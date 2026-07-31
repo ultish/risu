@@ -1,4 +1,4 @@
-import { estimateFyTax, type CgtRegime, type ParsedTransaction } from "@yields/core";
+import { estimateFyTax, type CgtRegime, type ParsedTransaction } from "@risu/core";
 import type { Context } from "hono";
 import type Database from "better-sqlite3";
 
@@ -19,14 +19,14 @@ const VALID_REGIMES: CgtRegime[] = [
 /**
  * GET /api/tax/fy-estimate — roughly how much tax is owed for a financial
  * year: dividend income tax + realised CGT on actual sells (FIFO per-parcel
- * cost base, see @yields/core `computeLots`/`estimateRealisedCgtForLedger`),
+ * cost base, see @risu/core `computeLots`/`estimateRealisedCgtForLedger`),
  * combined the same way the planner combines them for a hypothetical
  * scenario, but against the real ledger.
  *
  * Query: portfolioId?, broker?, source?, taxProfileId? (default profile if
  * omitted), regime? (default auto_by_date), inflationRate? (decimal,
  * post-2027 CPI indexation), asxFrankingPercent?, usWithholdingRate?
- * (decimal 0-1). Thin plumbing only — all math lives in @yields/core.
+ * (decimal 0-1). Thin plumbing only — all math lives in @risu/core.
  */
 export function registerTaxRoutes(
   app: {

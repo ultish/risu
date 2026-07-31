@@ -4,7 +4,7 @@ import {
   readWorkbook,
   reconcileStakeActivity,
   type ReconcileLedgerRow,
-} from "@yields/core";
+} from "@risu/core";
 import type { Context } from "hono";
 import type Database from "better-sqlite3";
 

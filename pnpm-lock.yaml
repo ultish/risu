@@ -13,7 +13,7 @@ importers:
       '@hono/node-server':
         specifier: ^1.14.1
         version: 1.19.15(hono@4.12.32)
-      '@yields/core':
+      '@risu/core':
         specifier: workspace:*
         version: link:../../packages/core
       better-sqlite3:
