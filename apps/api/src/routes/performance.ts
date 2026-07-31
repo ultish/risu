@@ -66,7 +66,7 @@ export function registerPerformanceRoutes(
   });
 }
 
-function loadPriceSeries(db: Database.Database): PriceSeriesMap {
+export function loadPriceSeries(db: Database.Database): PriceSeriesMap {
   const rows = db
     .prepare(
       `SELECT symbol, date, close FROM price_cache ORDER BY symbol, date ASC`,
@@ -128,7 +128,7 @@ function loadPriceSeries(db: Database.Database): PriceSeriesMap {
   return series;
 }
 
-function loadFxRates(
+export function loadFxRates(
   db: Database.Database,
 ): Record<string, number | null> {
   const fxRows = db
@@ -140,7 +140,7 @@ function loadFxRates(
 }
 
 /** Daily FX history for as-of valuation (pair → sorted {date, rate}[]). */
-function loadFxHistory(
+export function loadFxHistory(
   db: Database.Database,
 ): Record<string, Array<{ date: string; rate: number }>> {
   const rows = db

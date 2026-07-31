@@ -181,6 +181,47 @@ describe("summarizeDividendIncome", () => {
     expect(summary.grandTotalAud).toBe(100);
   });
 
+  it("splits amountCashAud / amountDrpAud per FY line for a chart-friendly cash-vs-DRP breakdown", () => {
+    const summary = summarizeDividendIncome([
+      tx({ date: "2024-02-01", ticker: "A200", type: "dividend_cash", amount: 30 }),
+      tx({
+        date: "2024-06-01",
+        ticker: "IOZ",
+        type: "drp",
+        quantity: 1,
+        price: 45,
+        amount: 45,
+      }),
+    ]);
+    const fy2024 = summary.fyTotals.find((t) => t.financialYear === "FY2024")!;
+    expect(fy2024.amountCashAud).toBeCloseTo(30);
+    expect(fy2024.amountDrpAud).toBeCloseTo(45);
+    expect(fy2024.amountAud).toBeCloseTo(75);
+  });
+
+  it("exposes per-transaction events (post dedup/pooling) for a line-level breakdown", () => {
+    const summary = summarizeDividendIncome([
+      tx({ date: "2024-02-01", ticker: "A200", type: "dividend_cash", amount: 30 }),
+      // Matches a nearby cash dividend exactly -> deduped, should NOT appear as its own event.
+      tx({ date: "2024-06-01", ticker: "IOZ", type: "dividend_cash", amount: 20 }),
+      tx({ date: "2024-06-02", ticker: "IOZ", type: "drp", quantity: 1, price: 20, amount: 20 }),
+    ]);
+    expect(summary.events).toHaveLength(2);
+    expect(summary.events[0]).toMatchObject({
+      financialYear: "FY2024",
+      ticker: "A200",
+      date: "2024-02-01",
+      amount: 30,
+      source: "cash",
+    });
+    expect(summary.events[1]).toMatchObject({
+      ticker: "IOZ",
+      date: "2024-06-01",
+      amount: 20,
+      source: "cash",
+    });
+  });
+
   it("converts foreign DRP with FX map", () => {
     // AUDUSD=X = USD per 1 AUD → AUD = USD / rate
     const summary = summarizeDividendIncome(

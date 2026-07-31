@@ -23,13 +23,17 @@ import {
   reconcileFile,
   refreshPrices,
 } from "./api";
+import AllocationChart from "./AllocationChart";
 import { Disclaimer } from "./Disclaimer";
+import DividendIncomeChart from "./DividendIncomeChart";
 import ExportBar from "./ExportBar";
+import GainsChart from "./GainsChart";
 import ImportHistoryPanel from "./ImportHistoryPanel";
 import StakeDrpPanel from "./StakeDrpPanel";
 import PerformanceChart from "./PerformanceChart";
 import { PlannerPanel } from "./PlannerPanel";
 import { SettingsPanel } from "./SettingsPanel";
+import { TaxEstimatePanel } from "./TaxEstimatePanel";
 import { TaxSettingsPanel } from "./TaxSettingsPanel";
 import { TickerPanel } from "./TickerPanel";
 
@@ -40,6 +44,7 @@ const MAIN_TABS = [
   "ticker",
   "import",
   "planner",
+  "tax",
   "settings",
 ] as const;
 type MainTab = (typeof MAIN_TABS)[number];
@@ -1015,6 +1020,7 @@ export default function App() {
             ["transactions", "Transactions"],
             ["import", "Import"],
             ["planner", "Planner"],
+            ["tax", "Tax"],
             ["settings", "Settings"],
           ] as const
         ).map(([id, label]) => (
@@ -1184,10 +1190,13 @@ export default function App() {
               </div>
             )}
           </Panel>
+          <AllocationChart holdings={holdings} />
           <PerformanceChart
             filters={filters}
             reloadToken={pricesReloadToken}
           />
+          <GainsChart filters={filters} reloadToken={pricesReloadToken} />
+          <DividendIncomeChart filters={filters} reloadToken={pricesReloadToken} />
         </div>
       )}
 
@@ -2006,6 +2015,16 @@ export default function App() {
       )}
 
       {tab === "planner" && <PlannerPanel />}
+
+      {tab === "tax" && (
+        <div className="space-y-4">
+          <TaxEstimatePanel
+            portfolioId={portfolioId}
+            portfolios={portfolios}
+            onPortfolioChange={setPortfolioId}
+          />
+        </div>
+      )}
 
       {tab === "settings" && (
         <div className="space-y-4">

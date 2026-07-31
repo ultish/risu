@@ -19,10 +19,25 @@ export type IncomeLine = {
   amount: number;
   /** AUD converted when FX available; else null for non-AUD */
   amountAud: number | null;
+  /** Cash-only / DRP-only slice of amountAud (same null-when-missing-FX rule) */
+  amountCashAud: number | null;
+  amountDrpAud: number | null;
   count: number;
   /** How many rows were cash dividends vs DRP-only (reinvest still taxable) */
   cashCount: number;
   drpCount: number;
+};
+
+/** One assessable dividend/DRP event (post dedup/pooling) — line-level detail for display. */
+export type AssessableDividendEvent = {
+  financialYear: string;
+  date: string;
+  ticker: string;
+  exchange: string;
+  currency: string;
+  amount: number;
+  amountAud: number | null;
+  source: "cash" | "drp";
 };
 
 export type IncomeSummary = {
@@ -31,11 +46,15 @@ export type IncomeSummary = {
   fyTotals: Array<{
     financialYear: string;
     amountAud: number | null;
+    amountCashAud: number | null;
+    amountDrpAud: number | null;
     amountNativeMixed: number;
     count: number;
     cashCount: number;
     drpCount: number;
   }>;
+  /** Per-transaction detail behind byFy/fyTotals (post dedup/pooling) — for a "why is this my dividend tax" breakdown. */
+  events: AssessableDividendEvent[];
   grandTotalAud: number | null;
   missingFx: string[];
   notes: string[];
@@ -223,6 +242,8 @@ export function summarizeDividendIncome(
       currency: e.currency,
       amount: 0,
       amountAud: 0,
+      amountCashAud: 0,
+      amountDrpAud: 0,
       count: 0,
       cashCount: 0,
       drpCount: 0,
@@ -233,13 +254,23 @@ export function summarizeDividendIncome(
     else cur.drpCount += 1;
 
     const aud = toAud(e.amount, e.currency, fxRates);
-    if (aud == null && e.currency !== "AUD") {
+    const missing = aud == null && e.currency !== "AUD";
+    const audOrNative = aud ?? e.amount;
+    if (missing) {
       missingFx.add(e.currency);
       cur.amountAud = cur.amountAud === 0 ? null : cur.amountAud;
-    } else if (aud != null) {
-      cur.amountAud = (cur.amountAud ?? 0) + aud;
+      if (e.source === "cash") {
+        cur.amountCashAud = cur.amountCashAud === 0 ? null : cur.amountCashAud;
+      } else {
+        cur.amountDrpAud = cur.amountDrpAud === 0 ? null : cur.amountDrpAud;
+      }
     } else {
-      cur.amountAud = (cur.amountAud ?? 0) + e.amount;
+      cur.amountAud = (cur.amountAud ?? 0) + audOrNative;
+      if (e.source === "cash") {
+        cur.amountCashAud = (cur.amountCashAud ?? 0) + audOrNative;
+      } else {
+        cur.amountDrpAud = (cur.amountDrpAud ?? 0) + audOrNative;
+      }
     }
     bucket.set(key, cur);
   }
@@ -249,6 +280,10 @@ export function summarizeDividendIncome(
       ...line,
       amount: round2(line.amount),
       amountAud: line.amountAud == null ? null : round2(line.amountAud),
+      amountCashAud:
+        line.amountCashAud == null ? null : round2(line.amountCashAud),
+      amountDrpAud:
+        line.amountDrpAud == null ? null : round2(line.amountDrpAud),
     }))
     .sort((a, b) => {
       const fy = b.financialYear.localeCompare(a.financialYear);
@@ -263,22 +298,30 @@ export function summarizeDividendIncome(
     {
       financialYear: string;
       amountAud: number | null;
+      amountCashAud: number | null;
+      amountDrpAud: number | null;
       amountNativeMixed: number;
       count: number;
       cashCount: number;
       drpCount: number;
       hasMissing: boolean;
+      hasMissingCash: boolean;
+      hasMissingDrp: boolean;
     }
   >();
   for (const line of byFy) {
     const cur = fyMap.get(line.financialYear) ?? {
       financialYear: line.financialYear,
       amountAud: 0,
+      amountCashAud: 0,
+      amountDrpAud: 0,
       amountNativeMixed: 0,
       count: 0,
       cashCount: 0,
       drpCount: 0,
       hasMissing: false,
+      hasMissingCash: false,
+      hasMissingDrp: false,
     };
     cur.amountNativeMixed += line.amount;
     cur.count += line.count;
@@ -288,6 +331,16 @@ export function summarizeDividendIncome(
       cur.hasMissing = true;
     } else {
       cur.amountAud = (cur.amountAud ?? 0) + line.amountAud;
+    }
+    if (line.amountCashAud == null) {
+      cur.hasMissingCash = true;
+    } else {
+      cur.amountCashAud = (cur.amountCashAud ?? 0) + line.amountCashAud;
+    }
+    if (line.amountDrpAud == null) {
+      cur.hasMissingDrp = true;
+    } else {
+      cur.amountDrpAud = (cur.amountDrpAud ?? 0) + line.amountDrpAud;
     }
     fyMap.set(line.financialYear, cur);
   }
@@ -301,6 +354,18 @@ export function summarizeDividendIncome(
           : t.amountAud == null
             ? null
             : round2(t.amountAud),
+      amountCashAud:
+        t.hasMissingCash && t.amountCashAud === 0
+          ? null
+          : t.amountCashAud == null
+            ? null
+            : round2(t.amountCashAud),
+      amountDrpAud:
+        t.hasMissingDrp && t.amountDrpAud === 0
+          ? null
+          : t.amountDrpAud == null
+            ? null
+            : round2(t.amountDrpAud),
       amountNativeMixed: round2(t.amountNativeMixed),
       count: t.count,
       cashCount: t.cashCount,
@@ -326,9 +391,26 @@ export function summarizeDividendIncome(
     grandTotalAud = round2(grandTotalAud ?? 0);
   }
 
+  const dividendEvents: AssessableDividendEvent[] = events
+    .map((e) => ({
+      financialYear: auFinancialYear(e.date),
+      date: e.date,
+      ticker: e.ticker,
+      exchange: e.exchange,
+      currency: e.currency,
+      amount: round2(e.amount),
+      amountAud: (() => {
+        const aud = toAud(e.amount, e.currency, fxRates);
+        return aud == null ? (e.currency === "AUD" ? round2(e.amount) : null) : round2(aud);
+      })(),
+      source: e.source,
+    }))
+    .sort((a, b) => a.date.localeCompare(b.date));
+
   return {
     byFy,
     fyTotals,
+    events: dividendEvents,
     grandTotalAud,
     missingFx: [...missingFx].sort(),
     notes,

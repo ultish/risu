@@ -30,11 +30,12 @@ Import your trades, refresh prices when you choose, and run “what if?” scena
 ### See your portfolio clearly
 
 - **Separate portfolios** — e.g. yours and a partner’s — each with its own trades
-- **Import from real exports** — CommSec, Pocket, Selfwealth, Stake, Betashares Direct, or Sharesight (file or paste). Details: [import guide](./docs/import-sources.md)
+- **Import from real exports** — CommSec, Pocket, Selfwealth, Stake, Betashares Direct, or Sharesight (file or paste), plus **annual statement PDFs** (Selfwealth, Betashares Direct, Computershare, Link/MUFG). Details: [import guide](./docs/import-sources.md)
 - **Add a trade by hand** when a file doesn’t cover it
-- **Holdings at a glance** — units, cost base, last price, unrealised gain/loss in **AUD**
+- **Holdings at a glance** — units, cost base, last price, unrealised gain/loss in **AUD**; click a row for a **per-ticker detail page**
 - **Full trade history** — search-friendly ledger; export to CSV when you need a copy
 - **Performance over time** — cost base vs market value chart; hover for any month, zoom the range you care about
+- **Allocation, gains, and income charts** — where your value sits by ticker, realised vs unrealised gain by financial year, and dividend income by financial year
 - **One-click backup** of your whole local database (dated file you can stash offline)
 
 ### Prices without the noise
@@ -48,6 +49,7 @@ Import your trades, refresh prices when you choose, and run “what if?” scena
 ### Tax sketches & planning (not a tax return)
 
 - **Tax profiles** — set rough marginal rate and Medicare for illustrations
+- **FY tax estimate (Tax tab)** — roughly how much tax you owe for a financial year: dividend income tax plus realised CGT on your actual sells, combined. Capital gains use real **FIFO per-parcel cost base** (not average cost), so each sold parcel's own acquisition date decides whether the pre- or post–1 Jul 2027 CGT rules apply — per disposal, not per holding. Expandable rows show every underlying parcel: acquired/disposed dates, proceeds, cost base, gain, and tax
 - **DRP check** — spot possible missing reinvestment lots (suggestions only; it won’t invent history)
 - **New-money planner** — compare growth vs income-style portfolios for **future** contributions under a **post–Jul 2027 CGT-style** framing (indexed cost idea, no 50% discount in the main path). Built for “what if I put new capital here?” — not rewriting the past
 

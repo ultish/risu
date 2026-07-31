@@ -470,6 +470,43 @@ export async function fetchPerformance(f: Filters = {}) {
   }>(await fetch(`${BASE}/api/performance${qs(f)}`));
 }
 
+// ─── Gains by FY (realised vs unrealised, tax-agnostic) ─────────────────────
+
+export type GainsByFyRow = {
+  financialYear: string;
+  realisedGainAud: number;
+  unrealisedGainAud: number | null;
+};
+
+export async function fetchGainsByFy(f: Filters = {}) {
+  return json<{
+    byFy: GainsByFyRow[];
+    filters: { portfolioId: number | null; broker: string | null; source: string | null };
+  }>(await fetch(`${BASE}/api/gains/by-fy${qs(f)}`));
+}
+
+// ─── Dividend income by FY (cash vs DRP) ────────────────────────────────────
+
+export type IncomeFyTotal = {
+  financialYear: string;
+  amountAud: number | null;
+  amountCashAud: number | null;
+  amountDrpAud: number | null;
+  amountNativeMixed: number;
+  count: number;
+  cashCount: number;
+  drpCount: number;
+};
+
+export async function fetchIncome(f: Filters = {}) {
+  return json<{
+    fyTotals: IncomeFyTotal[];
+    grandTotalAud: number | null;
+    missingFx: string[];
+    notes: string[];
+  }>(await fetch(`${BASE}/api/income${qs(f)}`));
+}
+
 /** Relative URL for browser download of filtered ledger CSV */
 export function exportTransactionsCsvUrl(f: Filters = {}) {
   return `${BASE}/api/export/transactions.csv${qs(f)}`;
@@ -628,6 +665,93 @@ export async function putTaxProfiles(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profiles }),
     }),
+  );
+}
+
+// ─── FY tax estimate (dividend tax + realised CGT on actual sells) ─────────
+
+export type RealisedCgtLineDto = {
+  ticker: string;
+  exchange: string;
+  acquiredDate: string;
+  disposedDate: string;
+  quantity: number;
+  proceedsAud: number;
+  costBaseAud: number;
+  financialYear: string;
+  /** Raw gain/loss for this disposal — negative = loss. Tax is computed at the FY level (see fyTotals), not per line. */
+  capitalGain: number;
+  longTerm: boolean;
+  appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+};
+
+export type FyTaxTotalDto = {
+  financialYear: string;
+  assessableDividendIncome: number;
+  dividendNetTax: number;
+  /** Net of this FY's own gains and losses — can be negative (a net capital loss). Unaffected by carry-forward. */
+  netCapitalGain: number;
+  /** How much of a prior FY's unused capital loss was applied to reduce this FY's CGT tax. */
+  priorLossApplied: number;
+  /** Unused capital loss carried forward into the next FY. */
+  lossCarriedForward: number;
+  cgtTax: number;
+  totalTax: number;
+};
+
+export type AssessableDividendEventDto = {
+  financialYear: string;
+  date: string;
+  ticker: string;
+  exchange: string;
+  currency: string;
+  amount: number;
+  amountAud: number | null;
+  source: "cash" | "drp";
+};
+
+export type FyTaxEstimateDto = {
+  byFy: FyTaxTotalDto[];
+  dividendEvents: AssessableDividendEventDto[];
+  cgt: {
+    lines: RealisedCgtLineDto[];
+    fyTotals: Array<{
+      financialYear: string;
+      appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+      totalGains: number;
+      totalLosses: number;
+      netCapitalGain: number;
+      netCapitalLoss: number;
+      lossCarriedIn: number;
+      priorLossApplied: number;
+      lossCarriedOut: number;
+      taxableGain: number;
+      tax: number;
+      disposalCount: number;
+    }>;
+  };
+  dividendTax: {
+    notes: string[];
+  };
+  notes: string[];
+  taxProfile: { id: number; label: string; marginalRate: number; medicareLevy: number };
+  regime: CgtRegime;
+  filters: { portfolioId: number | null; broker: string | null; source: string | null };
+};
+
+export async function fetchFyTaxEstimate(opts: {
+  portfolioId?: number | null;
+  taxProfileId?: number;
+  regime?: CgtRegime;
+  inflationRate?: number;
+}) {
+  const params = new URLSearchParams();
+  if (opts.portfolioId != null) params.set("portfolioId", String(opts.portfolioId));
+  if (opts.taxProfileId != null) params.set("taxProfileId", String(opts.taxProfileId));
+  if (opts.regime) params.set("regime", opts.regime);
+  if (opts.inflationRate != null) params.set("inflationRate", String(opts.inflationRate));
+  return json<FyTaxEstimateDto>(
+    await fetch(`${BASE}/api/tax/fy-estimate?${params.toString()}`),
   );
 }
 

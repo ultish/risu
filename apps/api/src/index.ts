@@ -41,8 +41,10 @@ import path from "node:path";
 import { getDbPath, openDb } from "./db.js";
 import { registerExportRoutes } from "./routes/export.js";
 import { registerPerformanceRoutes } from "./routes/performance.js";
+import { registerGainsRoutes } from "./routes/gains.js";
 import { registerReconcileRoutes } from "./routes/reconcile.js";
 import { registerStakeDrpRoutes } from "./routes/stakeDrp.js";
+import { registerTaxRoutes } from "./routes/tax.js";
 import { closeYahooBrowser, yahooBrowserFetch } from "./yahooBrowserFetch.js";
 import {
   assertYahooAllowed,
@@ -379,6 +381,8 @@ registerPerformanceRoutes(app, { getDb, loadTransactions });
 registerExportRoutes(app, { getDb, dbPath: getDbPath() });
 registerReconcileRoutes(app, { getDb });
 registerStakeDrpRoutes(app, { getDb });
+registerTaxRoutes(app, { getDb, loadTransactions, priceMapsFromCache });
+registerGainsRoutes(app, { getDb, loadTransactions, priceMapsFromCache });
 
 const SQLITE_MAGIC = Buffer.from("SQLite format 3\0", "utf8");
 
