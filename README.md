@@ -124,6 +124,20 @@ docker compose up --build
 
 Open **http://localhost:8787**. DB on volume `yields-data` (`YIELDS_DB_PATH=/data/yields.db`).
 
+### Local deploy scripts
+
+Outside this repo, `<your prod folder>/` holds two helper scripts for running Risu as a standalone Docker container (separate from `docker compose up`):
+
+| Script | What |
+|--------|------|
+| `build.sh` | Builds the `risu:latest` image from this repo (`docker build`), saves it to `risu-latest.tar`, and gzips a dated backup into `image-backups/`. Run after pulling/making changes you want reflected in `run.sh`. |
+| `run.sh` | Starts (or resumes) the `risu` container from the `risu:latest` image, loading it from `risu-latest.tar` first if the image isn't already in Docker. Serves at `http://localhost:8787` (override with `PORT`); DB persisted to `./db`. |
+
+```bash
+<your prod folder>/build.sh   # rebuild image + tarball after source changes
+<your prod folder>/run.sh     # start the container
+```
+
 ### Environment
 
 | Variable | Meaning |
