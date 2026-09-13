@@ -3,6 +3,7 @@ import {
   type AppSettings,
   type FilterMeta,
   type Holding,
+  type ImportPreviewResult,
   type ImportResult,
   type Portfolio,
   type ReconcileResult,
@@ -20,6 +21,7 @@ import {
   fetchYahooStatus,
   importFile,
   importSharesightPaste,
+  previewImportFile,
   reconcileFile,
   refreshPrices,
 } from "./api";
@@ -146,6 +148,9 @@ type FileQueueItem = {
   reconcile: ReconcileResult | null;
   reconciling: boolean;
   reconcileError: string | null;
+  preview: ImportPreviewResult | null;
+  previewing: boolean;
+  previewError: string | null;
 };
 
 function fileQueueKey(file: File) {
@@ -242,6 +247,18 @@ export function money(
 
 export function qty(n: number) {
   return n.toLocaleString("en-AU", { maximumFractionDigits: 6 });
+}
+
+/**
+ * Label for a disposal's CGT treatment. `discount_50` is the pre–Jul 2027
+ * *ruleset* — the 50% discount only actually applies when held ≥ 365 days.
+ */
+export function cgtLineRegimeLabel(
+  applied: "discount_50" | "indexation_min30",
+  longTerm: boolean,
+): string {
+  if (applied === "indexation_min30") return "Indexed";
+  return longTerm ? "50% disc." : "No disc. (short)";
 }
 
 /** Unrealised return % (native currency — cost and value in the same currency, FX-neutral). */
@@ -591,9 +608,9 @@ export default function App() {
     );
   }
 
-  function openTickerPage(h: Holding) {
-    setTickerFilter(h.ticker);
-    setExchangeFilter(h.exchange);
+  function openTickerPage(ticker: string, exchange: string) {
+    setTickerFilter(ticker);
+    setExchangeFilter(exchange);
     setTab("ticker");
   }
 
@@ -651,6 +668,9 @@ export default function App() {
           reconcile: null,
           reconciling: false,
           reconcileError: null,
+          preview: null,
+          previewing: false,
+          previewError: null,
         });
       }
       return next;
@@ -674,6 +694,8 @@ export default function App() {
           ...i,
           parserOverride,
           status: classifyItem(parserOverride, i.custodyOverride, parser),
+          preview: null,
+          previewError: null,
         };
       }),
     );
@@ -687,9 +709,17 @@ export default function App() {
               ...i,
               custodyOverride: value,
               status: classifyItem(i.parserOverride, value, parser),
+              preview: null,
+              previewError: null,
             }
           : i,
       ),
+    );
+  }
+
+  function clearPreviews() {
+    setFiles((prev) =>
+      prev.map((i) => ({ ...i, preview: null, previewError: null })),
     );
   }
 
@@ -719,6 +749,52 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  /** Dry-run every ready file so the transaction table can be reviewed before onImport() actually writes anything. */
+  async function onPreview() {
+    const readyKeys = files.filter((f) => f.status === "ready").map((f) => f.key);
+    if (!readyKeys.length) {
+      setError("Add at least one CSV or XLSX file");
+      return;
+    }
+    setError(null);
+    setFiles((prev) =>
+      prev.map((i) =>
+        readyKeys.includes(i.key)
+          ? { ...i, previewing: true, previewError: null }
+          : i,
+      ),
+    );
+    await Promise.all(
+      readyKeys.map(async (key) => {
+        const item = files.find((i) => i.key === key);
+        if (!item) return;
+        try {
+          const preview = await previewImportFile({
+            file: item.file,
+            parser: item.parserOverride ?? parser,
+            broker: item.custodyOverride || undefined,
+          });
+          setFiles((prev) =>
+            prev.map((i) =>
+              i.key === key
+                ? { ...i, previewing: false, preview, previewError: null }
+                : i,
+            ),
+          );
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          setFiles((prev) =>
+            prev.map((i) =>
+              i.key === key
+                ? { ...i, previewing: false, previewError: message }
+                : i,
+            ),
+          );
+        }
+      }),
+    );
   }
 
   async function onImport() {
@@ -1151,7 +1227,7 @@ export default function App() {
                       <tr
                         key={`${h.exchange}:${h.ticker}`}
                         className="cursor-pointer border-t border-gray-800/80 hover:bg-emerald-500/10"
-                        onClick={() => openTickerPage(h)}
+                        onClick={() => openTickerPage(h.ticker, h.exchange)}
                       >
                         <td className="px-3 py-2.5 font-medium text-emerald-300">
                           {h.ticker}
@@ -1207,6 +1283,7 @@ export default function App() {
             exchange={exchangeFilter}
             holding={selectedHolding}
             filters={filters}
+            portfolios={portfolios}
             reloadToken={pricesReloadToken}
             onBack={() => setTab("holdings")}
             onViewLedger={() => {
@@ -1250,7 +1327,7 @@ export default function App() {
               onClear={clearFilters}
             />
             <Panel title="No ticker selected">
-              <Empty hint="Open a ticker page by clicking a row on Holdings." />
+              <Empty hint="Open a ticker page by clicking a row on Holdings or a ticker in Transactions." />
             </Panel>
           </div>
         ))}
@@ -1293,7 +1370,8 @@ export default function App() {
                 </button>
               )}
               <span className="text-xs text-gray-500">
-                {sortedTxs.length} row{sortedTxs.length === 1 ? "" : "s"}
+                Click a ticker to open its page. {sortedTxs.length} row
+                {sortedTxs.length === 1 ? "" : "s"}
                 {selectedTxIds.size > 0
                   ? ` · ${selectedTxIds.size} selected`
                   : ""}
@@ -1317,7 +1395,7 @@ export default function App() {
                 style={{ height: TX_VIEW_H }}
                 onScroll={(e) => setTxScrollTop(e.currentTarget.scrollTop)}
               >
-                <table className="w-full min-w-[1000px] table-fixed text-left text-sm">
+                <table className="w-full min-w-[1100px] table-fixed text-left text-sm">
                   <thead className="sticky top-0 z-10 bg-gray-900 text-xs uppercase tracking-wide text-gray-500 shadow">
                     <tr>
                       <th className="w-10 px-2 py-2.5">
@@ -1355,6 +1433,7 @@ export default function App() {
                         dir={txSort.dir}
                         onClick={() => toggleTxSort("type")}
                       />
+                      <th className="px-2 py-2.5 font-medium">Parcel</th>
                       <SortTh
                         label="Broker"
                         active={txSort.key === "broker"}
@@ -1385,7 +1464,7 @@ export default function App() {
                     {txVirtual.padTop > 0 && (
                       <tr aria-hidden>
                         <td
-                          colSpan={9}
+                          colSpan={10}
                           style={{ height: txVirtual.padTop, padding: 0 }}
                         />
                       </tr>
@@ -1393,12 +1472,16 @@ export default function App() {
                     {txVirtual.rows.map((t) => (
                       <tr
                         key={t.id}
-                        className={`border-t border-gray-800/80 ${
+                        className={`cursor-pointer border-t border-gray-800/80 hover:bg-emerald-500/10 ${
                           selectedTxIds.has(t.id) ? "bg-sky-500/10" : ""
                         }`}
                         style={{ height: TX_ROW_H }}
+                        onClick={() => openTickerPage(t.ticker, t.exchange)}
                       >
-                        <td className="px-2 py-1">
+                        <td
+                          className="px-2 py-1"
+                          onClick={(e) => e.stopPropagation()}
+                        >
                           <input
                             type="checkbox"
                             checked={selectedTxIds.has(t.id)}
@@ -1409,7 +1492,9 @@ export default function App() {
                         <td className="px-2 py-1 tabular-nums text-gray-300">
                           {t.date}
                         </td>
-                        <td className="px-2 py-1 font-medium">{t.ticker}</td>
+                        <td className="px-2 py-1 font-medium text-emerald-300">
+                          {t.ticker}
+                        </td>
                         <td className="px-2 py-1">
                           <ExchangeBadge
                             exchange={t.exchange}
@@ -1418,6 +1503,12 @@ export default function App() {
                         </td>
                         <td className="px-2 py-1">
                           <TypeBadge type={t.type} />
+                        </td>
+                        <td
+                          className="px-2 py-1"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <ParcelBadge tx={t} />
                         </td>
                         <td className="px-2 py-1 text-xs text-gray-400">
                           {t.broker || t.custody || "—"}
@@ -1436,7 +1527,7 @@ export default function App() {
                     {txVirtual.padBottom > 0 && (
                       <tr aria-hidden>
                         <td
-                          colSpan={9}
+                          colSpan={10}
                           style={{ height: txVirtual.padBottom, padding: 0 }}
                         />
                       </tr>
@@ -1467,12 +1558,23 @@ export default function App() {
           )}
 
           {importSub === "stakeDrp" && (
-            <StakeDrpPanel
-              portfolioId={portfolioId}
-              portfolios={portfolios}
-              onPortfolioChange={setPortfolioId}
-              onCommitted={() => void load()}
-            />
+            <>
+              <ImportHistoryPanel
+                portfolioId={portfolioId}
+                refreshSignal={historyTick}
+                source="stake-drp-detect"
+                title="Files already used here"
+                filesOnly
+                defaultShowFiles
+              />
+              <StakeDrpPanel
+                portfolioId={portfolioId}
+                portfolios={portfolios}
+                onPortfolioChange={setPortfolioId}
+                onCommitted={() => void load()}
+                onHistoryChange={() => setHistoryTick((n) => n + 1)}
+              />
+            </>
           )}
 
           {importSub === "file" && (
@@ -1753,19 +1855,48 @@ export default function App() {
                 </div>
               )}
 
-              <button
-                type="button"
-                disabled={busy || !files.some((f) => f.status === "ready")}
-                onClick={() => void onImport()}
-                className="mt-5 rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
-              >
-                {busy
-                  ? "Importing…"
-                  : `Import ready (${
-                      files.filter((f) => f.status === "ready").length
-                    })`}
-              </button>
+              {(() => {
+                const readyFiles = files.filter((f) => f.status === "ready");
+                const anyPreviewing = readyFiles.some((f) => f.previewing);
+                const allPreviewed =
+                  readyFiles.length > 0 &&
+                  readyFiles.every((f) => f.preview || f.previewError);
+                const previewedTxCount = readyFiles.reduce(
+                  (n, f) => n + (f.preview?.parsed ?? 0),
+                  0,
+                );
+                return (
+                  <div className="mt-5 flex items-center gap-3">
+                    <button
+                      type="button"
+                      disabled={busy || anyPreviewing || !readyFiles.length}
+                      onClick={() =>
+                        void (allPreviewed ? onImport() : onPreview())
+                      }
+                      className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
+                    >
+                      {busy
+                        ? "Importing…"
+                        : anyPreviewing
+                          ? "Checking files…"
+                          : allPreviewed
+                            ? `Confirm import (${previewedTxCount} transaction${previewedTxCount === 1 ? "" : "s"})`
+                            : `Preview import (${readyFiles.length})`}
+                    </button>
+                    {allPreviewed && (
+                      <button
+                        type="button"
+                        onClick={clearPreviews}
+                        className="rounded-md px-2 py-1 text-xs text-gray-500 hover:bg-gray-800 hover:text-gray-300"
+                      >
+                        Edit files
+                      </button>
+                    )}
+                  </div>
+                );
+              })()}
 
+              <ImportPreviewSection files={files} />
               <ImportBatchSummary files={files} />
             </Panel>
           )}
@@ -2495,6 +2626,105 @@ function FileStatusBadge({ item }: { item: FileQueueItem }) {
   }
 }
 
+/** Table of exactly what onImport() would write, grouped by file, shown before the user confirms. */
+function ImportPreviewSection({ files }: { files: FileQueueItem[] }) {
+  const previewed = files.filter(
+    (f) => f.status === "ready" && (f.preview || f.previewError),
+  );
+  if (!previewed.length) return null;
+  return (
+    <div className="mt-4 space-y-3 rounded-lg border border-gray-800 bg-gray-900/40 p-3">
+      {previewed.map((f) => (
+        <ImportPreviewFile key={f.key} item={f} />
+      ))}
+    </div>
+  );
+}
+
+function ImportPreviewFile({ item }: { item: FileQueueItem }) {
+  if (item.previewError) {
+    return (
+      <div>
+        <p className="mb-1 text-xs text-gray-400">{item.file.name}</p>
+        <p className="text-xs text-red-300">{item.previewError}</p>
+      </div>
+    );
+  }
+  const preview = item.preview;
+  if (!preview) return null;
+  return (
+    <div>
+      <div className="mb-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-500">
+        <span className="text-gray-200">{item.file.name}</span>
+        <span>
+          · {preview.parsed} transaction{preview.parsed === 1 ? "" : "s"}
+        </span>
+        <span>· parser {preview.parser}</span>
+        <span>· custody {preview.custody ?? "—"}</span>
+        <span>· source {preview.source}</span>
+        {preview.skipped > 0 && (
+          <span className="text-amber-300">
+            · {preview.skipped} row{preview.skipped === 1 ? "" : "s"} skipped
+          </span>
+        )}
+      </div>
+      {preview.warnings.length > 0 && (
+        <ul className="mb-1 space-y-0.5 text-[11px] text-amber-200/80">
+          {preview.warnings.map((w, i) => (
+            <li key={i}>{w.message}</li>
+          ))}
+        </ul>
+      )}
+      {preview.transactions.length > 0 && (
+        <div className="max-h-72 overflow-auto rounded-md border border-gray-800/80">
+          <table className="w-full text-left text-xs">
+            <thead className="sticky top-0 bg-gray-900 text-gray-500">
+              <tr>
+                <th className="py-1 pr-2 pl-2">Date</th>
+                <th className="py-1 pr-2">Ticker</th>
+                <th className="py-1 pr-2">Exch</th>
+                <th className="py-1 pr-2">Type</th>
+                <th className="py-1 pr-2">Qty</th>
+                <th className="py-1 pr-2">Price</th>
+                <th className="py-1 pr-2">Amount</th>
+                <th className="py-1 pr-2">Brokerage</th>
+                <th className="py-1 pr-2">Ccy</th>
+                <th className="py-1 pr-2">Notes</th>
+              </tr>
+            </thead>
+            <tbody>
+              {preview.transactions.map((t, i) => (
+                <tr key={i} className="border-t border-gray-800/80">
+                  <td className="py-1 pr-2 pl-2 text-gray-300">{t.date}</td>
+                  <td className="py-1 pr-2 text-gray-300">{t.ticker}</td>
+                  <td className="py-1 pr-2 text-gray-400">{t.exchange}</td>
+                  <td className="py-1 pr-2 text-gray-400">{t.type}</td>
+                  <td className="py-1 pr-2 text-gray-400">{qty(t.quantity)}</td>
+                  <td className="py-1 pr-2 text-gray-400">
+                    {t.price != null ? money(t.price, t.currency, true) : "—"}
+                  </td>
+                  <td className="py-1 pr-2 text-gray-400">
+                    {t.amount != null
+                      ? money(t.amount, t.currency, true)
+                      : "—"}
+                  </td>
+                  <td className="py-1 pr-2 text-gray-400">
+                    {money(t.brokerage, t.currency)}
+                  </td>
+                  <td className="py-1 pr-2 text-gray-500">{t.currency}</td>
+                  <td className="py-1 pr-2 text-gray-500">
+                    {t.notes ?? "—"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ImportBatchSummary({ files }: { files: FileQueueItem[] }) {
   const done = files.filter((f) => f.status === "done" && f.result);
   const errored = files.filter((f) => f.status === "error");
@@ -2741,4 +2971,46 @@ export function TypeBadge({ type }: { type: string }) {
       {type}
     </span>
   );
+}
+
+/** Recorded parcel identification from a confirmed sale (not inferred FIFO). */
+export function ParcelBadge({ tx }: { tx: TxRow }) {
+  const p = tx.parcel;
+  if (!p) return <span className="text-gray-600">—</span>;
+  if (p.kind === "sell" && p.allocations?.length) {
+    const n = p.allocations.length;
+    const label = p.matching === "min_cgt" ? "Min CGT" : "FIFO";
+    const title = p.allocations
+      .map((a) => `${a.acquiredDate} · ${qty(a.quantity)} units`)
+      .join("\n");
+    return (
+      <span
+        title={title}
+        className="inline-block rounded-md bg-sky-500/15 px-2 py-0.5 text-[11px] text-sky-300"
+      >
+        {label} · {n} parcel{n === 1 ? "" : "s"}
+      </span>
+    );
+  }
+  if (p.kind === "acquire" && p.status === "sold") {
+    return (
+      <span
+        title={p.lastSoldDate ? `Sold ${p.lastSoldDate}` : "Sold"}
+        className="inline-block rounded-md bg-orange-500/15 px-2 py-0.5 text-[11px] text-orange-200"
+      >
+        Sold{p.lastSoldDate ? ` ${p.lastSoldDate}` : ""}
+      </span>
+    );
+  }
+  if (p.kind === "acquire" && p.status === "partial") {
+    return (
+      <span
+        title={`${qty(p.soldQuantity ?? 0)} sold · ${qty(p.remainingQuantity ?? 0)} left`}
+        className="inline-block rounded-md bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-200"
+      >
+        Partial · {qty(p.remainingQuantity ?? 0)} left
+      </span>
+    );
+  }
+  return <span className="text-gray-600">—</span>;
 }

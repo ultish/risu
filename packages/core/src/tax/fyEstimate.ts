@@ -1,21 +1,34 @@
 /**
  * Combined "roughly how much tax do I owe this FY" estimate: dividend
  * income tax (`estimateFyDividendTax`) + realised CGT on actual sells
- * (FIFO per-parcel via `computeLots` + `estimateRealisedCgtForLedger`,
+ * (per-parcel via `computeLots` + `estimateRealisedCgtForLedger`,
+ * FIFO or min-CGT matching,
  * which also carries unused capital losses forward across FYs) — the two
  * components of a real tax bill this app's ledger can support. Not a full
  * return: no salary/other income, no non-portfolio deductions.
  */
 import { summarizeDividendIncome, type AssessableDividendEvent } from "../income.js";
-import { computeLots } from "../lots.js";
+import { computeLots, type RecordedParcelTake } from "../lots.js";
 import type { ParsedTransaction } from "../types.js";
 import { estimateFyDividendTax, type FyTaxEstimateSummary } from "./incomeTax.js";
+import { orderFnForMatching } from "./lotMatching.js";
 import { estimateRealisedCgtForLedger, type RealisedCgtReport } from "./realisedCgt.js";
-import type { CgtRegime, TaxProfile } from "./types.js";
+import type { CgtRegime, LotMatchingMethod, TaxProfile } from "./types.js";
 
 export type FyTaxEstimateInput = {
   profile: TaxProfile;
   cgtRegime: CgtRegime;
+  /**
+   * How each historical sell is matched against open parcels.
+   * Default `fifo`. `min_cgt` re-identifies lots at each sell to minimise
+   * that disposal's estimated CGT (specific identification).
+   * Sells with `recordedTakes` always use the recorded parcels instead.
+   */
+  lotMatching?: LotMatchingMethod;
+  /** Confirmed specific-identification takes (win over lotMatching). */
+  recordedTakes?: RecordedParcelTake[];
+  /** Brokers whose imported sells stay FIFO. Default: Betashares Direct. */
+  platformFifoBrokers?: string[];
   /** CPI indexation p.a. for post-2027 CGT (decimal); default in cgt.ts */
   cgtInflationRate?: number;
   /** Assumed franking % 0–100 for ASX dividend lines only (default 70). */
@@ -62,7 +75,16 @@ export function estimateFyTax(
     ledgerIsNetOfWithholding: opts.ledgerIsNetOfWithholding,
   });
 
-  const { disposals } = computeLots(transactions, fxRates);
+  const lotMatching = opts.lotMatching ?? "fifo";
+  const { disposals } = computeLots(transactions, fxRates, {
+    orderLotsForSale: orderFnForMatching(lotMatching, {
+      regime: opts.cgtRegime,
+      annualInflationRate: opts.cgtInflationRate,
+    }),
+    customMatching: lotMatching === "min_cgt" ? "min_cgt" : undefined,
+    recordedTakes: opts.recordedTakes,
+    platformFifoBrokers: opts.platformFifoBrokers,
+  });
   const cgt = estimateRealisedCgtForLedger(disposals, {
     regime: opts.cgtRegime,
     profile: opts.profile,
@@ -105,6 +127,9 @@ export function estimateFyTax(
         "realised CGT on actual sells, with unused capital losses carried " +
         "forward across FYs; excludes salary/other income and non-portfolio " +
         "deductions.",
+      lotMatching === "min_cgt"
+        ? "Sells you can identify yourself are matched to minimise estimated CGT. Imported sells from brokers marked as issuing their own CGT report (default: Betashares Direct) stay FIFO. A sale confirmed on the ticker page uses the parcels you recorded."
+        : "Sells matched FIFO (oldest parcel first), except sales you confirmed with a specific parcel mix.",
       ...dividendTax.notes,
     ],
   };

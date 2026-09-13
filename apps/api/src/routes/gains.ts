@@ -4,6 +4,7 @@ import {
   summarizeFyEndSnapshots,
   summarizeRealisedGains,
   type ParsedTransaction,
+  type RecordedParcelTake,
 } from "@risu/core";
 import type { Context } from "hono";
 import type Database from "better-sqlite3";
@@ -34,6 +35,8 @@ export function registerGainsRoutes(
       prices: Record<string, number | null>;
       fxRates: Record<string, number | null>;
     };
+    loadParcelTakes: () => RecordedParcelTake[];
+    loadPlatformFifoBrokers: () => string[];
   },
 ) {
   app.get("/api/gains/by-fy", (c) => {
@@ -47,7 +50,10 @@ export function registerGainsRoutes(
       source,
     });
     const maps = deps.priceMapsFromCache();
-    const realised = summarizeRealisedGains(txs, maps.fxRates);
+    const realised = summarizeRealisedGains(txs, maps.fxRates, {
+      recordedTakes: deps.loadParcelTakes(),
+      platformFifoBrokers: deps.loadPlatformFifoBrokers(),
+    });
 
     const db = deps.getDb();
     const points = buildPerformanceSeries(txs, {

@@ -1,21 +1,22 @@
 /**
  * TaxEstimatePanel — roughly how much tax is owed for a financial year:
  * dividend income tax + realised CGT on actual sells, using per-parcel
- * (FIFO) cost base so each disposal's own acquisition date decides which
- * CGT regime (pre/post 1 Jul 2027) and discount/indexation applies.
- * GET /api/tax/fy-estimate.
+ * cost base (FIFO or minimise-CGT matching) so each disposal's own
+ * acquisition date decides which CGT regime (pre/post 1 Jul 2027) and
+ * discount/indexation applies. GET /api/tax/fy-estimate.
  */
 import { Fragment, useCallback, useEffect, useState } from "react";
 import {
   type CgtRegime,
   type FyTaxEstimateDto,
+  type LotMatchingMethod,
   type Portfolio,
   type TaxProfileDto,
   fetchFyTaxEstimate,
   fetchTaxProfiles,
 } from "./api";
 import { Disclaimer } from "./Disclaimer";
-import { Empty, Panel, money } from "./App";
+import { Empty, Panel, cgtLineRegimeLabel, money } from "./App";
 
 /** Current AU financial year label (browser local date) — e.g. "FY2027" for any date in 1 Jul 2026–30 Jun 2027. */
 function currentAuFinancialYear(): string {
@@ -25,10 +26,23 @@ function currentAuFinancialYear(): string {
   return `FY${m >= 7 ? y + 1 : y}`;
 }
 
+const MATCHING: Array<{ id: LotMatchingMethod; label: string; hint: string }> = [
+  {
+    id: "fifo",
+    label: "Auto (FIFO)",
+    hint: "Oldest parcel sold first",
+  },
+  {
+    id: "min_cgt",
+    label: "Auto (minimize CGT)",
+    hint: "Where you can choose; platform-report brokers stay FIFO",
+  },
+];
+
 const REGIMES: Array<{ id: CgtRegime; label: string }> = [
   { id: "auto_by_date", label: "Auto (pre/post 1 Jul 2027 by disposal date)" },
-  { id: "discount_50", label: "50% discount (legacy, all disposals)" },
-  { id: "indexation_min30", label: "Indexed, no discount (post-2027, all disposals)" },
+  { id: "discount_50", label: "50% discount (legacy, all disposals) — reference" },
+  { id: "indexation_min30", label: "Indexed, no discount (post-2027, all disposals) — reference" },
 ];
 
 export function TaxEstimatePanel({
@@ -42,6 +56,7 @@ export function TaxEstimatePanel({
 }) {
   const [profiles, setProfiles] = useState<TaxProfileDto[]>([]);
   const [profileId, setProfileId] = useState<number | undefined>(undefined);
+  const [lotMatching, setLotMatching] = useState<LotMatchingMethod>("fifo");
   const [regime, setRegime] = useState<CgtRegime>("auto_by_date");
   const [inflationPct, setInflationPct] = useState("2.5");
   const [report, setReport] = useState<FyTaxEstimateDto | null>(null);
@@ -68,6 +83,7 @@ export function TaxEstimatePanel({
         portfolioId: portfolioId === "all" ? null : portfolioId,
         taxProfileId: profileId,
         regime,
+        lotMatching,
         inflationRate: Number.isFinite(inflation) ? inflation / 100 : undefined,
       });
       setReport(result);
@@ -76,7 +92,7 @@ export function TaxEstimatePanel({
     } finally {
       setBusy(false);
     }
-  }, [portfolioId, profileId, regime, inflationPct]);
+  }, [portfolioId, profileId, regime, lotMatching, inflationPct]);
 
   useEffect(() => {
     void load();
@@ -88,9 +104,21 @@ export function TaxEstimatePanel({
         <p className="text-sm text-gray-400">
           Roughly how much tax to set aside for a financial year: dividend
           income tax plus realised capital gains tax on your actual sells.
-          Capital gains use FIFO per-parcel cost base — each sold parcel keeps
-          its own real acquisition date, so the 1 Jul 2027 CGT rule change
-          applies per-disposal rather than to the whole holding at once.{" "}
+          Each sold parcel keeps its own acquisition date, so the 1 Jul 2027
+          CGT rule change applies per-disposal.{" "}
+          <strong className="text-gray-300">Auto (FIFO)</strong> sells oldest
+          parcels first;{" "}
+          <strong className="text-gray-300">Auto (minimize CGT)</strong>{" "}
+          re-identifies parcels on sells you can choose (Stake, CommSec,
+          Selfwealth, or a sale you confirmed here).{" "}
+          <strong className="text-gray-300">
+            Brokers that issue their own CGT report stay FIFO
+          </strong>{" "}
+          on imported statement sells (default: Betashares Direct, including
+          auto-rebalance) — change the list under Settings → Tax. If you
+          sell those units yourself and want a different mix, confirm the
+          sale on the ticker page. The 50% discount and indexed options
+          force one regime on every disposal — kept for reference.{" "}
           <strong className="text-gray-300">Portfolio</strong> picks whose
           stocks to analyse; <strong className="text-gray-300">tax profile</strong>{" "}
           picks whose marginal rate to apply — set them to the same person for
@@ -104,6 +132,27 @@ export function TaxEstimatePanel({
         >
           {busy ? "Refreshing…" : "Refresh"}
         </button>
+      </div>
+
+      <div className="mb-4">
+        <span className="mb-1 block text-xs text-gray-500">Parcels</span>
+        <div className="flex flex-wrap gap-1 rounded-lg border border-gray-800 bg-gray-950/40 p-1">
+          {MATCHING.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => setLotMatching(m.id)}
+              className={`flex-1 rounded-md px-3 py-2 text-left text-sm transition-colors ${
+                lotMatching === m.id
+                  ? "bg-emerald-500/15 text-emerald-200"
+                  : "text-gray-400 hover:bg-gray-800 hover:text-gray-200"
+              }`}
+            >
+              <span className="block font-medium">{m.label}</span>
+              <span className="block text-[11px] text-gray-500">{m.hint}</span>
+            </button>
+          ))}
+        </div>
       </div>
 
       <div className="mb-4 grid gap-2 sm:grid-cols-4">
@@ -359,6 +408,7 @@ export function TaxEstimatePanel({
                                 <th className="py-1 pr-3 text-right">Cost base</th>
                                 <th className="py-1 pr-3 text-right">Gain/loss</th>
                                 <th className="py-1 pr-3">Term</th>
+                                <th className="py-1 pr-3">Parcels</th>
                                 <th className="py-1 pr-3">Regime</th>
                               </tr>
                             </thead>
@@ -397,9 +447,14 @@ export function TaxEstimatePanel({
                                     {l.longTerm ? "Long" : "Short"}
                                   </td>
                                   <td className="py-1 pr-3 text-gray-400">
-                                    {l.appliedRegime === "discount_50"
-                                      ? "50% disc."
-                                      : "Indexed"}
+                                    {l.parcelMatch === "recorded"
+                                      ? "Recorded"
+                                      : l.parcelMatch === "min_cgt"
+                                        ? "Min CGT"
+                                        : "FIFO"}
+                                  </td>
+                                  <td className="py-1 pr-3 text-gray-400">
+                                    {cgtLineRegimeLabel(l.appliedRegime, l.longTerm)}
                                   </td>
                                 </tr>
                               ))}
@@ -422,9 +477,12 @@ export function TaxEstimatePanel({
         <p className="mb-1 font-medium text-gray-400">How this is estimated</p>
         <ul className="list-inside list-disc space-y-1">
           <li>
-            Capital gains use FIFO per-parcel cost base (oldest lot sold
-            first) — not average cost — so discount eligibility and
-            indexation use each parcel's real acquisition date.
+            Capital gains use per-parcel cost base (not average cost) so
+            discount eligibility and indexation use each parcel's real
+            acquisition date.{" "}
+            {lotMatching === "min_cgt"
+              ? "Sells you can identify yourself use minimize-CGT parcel picking. Imported sells from brokers marked in Settings as issuing their own CGT report stay FIFO. A sale confirmed on the ticker page uses the parcels you recorded."
+              : "Sells consume the oldest remaining parcel first (FIFO), except sales you confirmed with a specific parcel mix."}
           </li>
           <li>
             <strong className="text-gray-400">Gains and losses net within the FY</strong>{" "}

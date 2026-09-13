@@ -3,6 +3,7 @@ import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import {
   computeHoldings,
+  computeLots,
   defaultAllocationTemplates,
   defaultCurrencyForExchange,
   fetchFxHistory,
@@ -16,6 +17,7 @@ import {
   fetchYahooHistory,
   fetchYahooSparkHistoryBulk,
   fetchYahooQuote,
+  fetchYahooQuotesBulk,
   holdingPriceKey,
   listInstrumentSeeds,
   parseBrokerFile,
@@ -27,9 +29,13 @@ import {
   runScenario,
   setYahooFetchImpl,
   summarizeDividendIncome,
+  estimateHypotheticalSale,
+  parsePlatformFifoBrokers,
   toYahooSymbol,
   type BrokerId,
   type InstrumentAssumptions,
+  type CgtRegime,
+  type LotMatchingMethod,
   type ParsedTransaction,
   type Scenario,
   type TransactionType,
@@ -45,6 +51,11 @@ import { registerGainsRoutes } from "./routes/gains.js";
 import { registerReconcileRoutes } from "./routes/reconcile.js";
 import { registerStakeDrpRoutes } from "./routes/stakeDrp.js";
 import { registerTaxRoutes } from "./routes/tax.js";
+import {
+  acquireTxsBlockedByParcels,
+  attachParcelInfo,
+  loadParcelTakes,
+} from "./parcels.js";
 import { closeYahooBrowser, yahooBrowserFetch } from "./yahooBrowserFetch.js";
 import {
   assertYahooAllowed,
@@ -231,6 +242,7 @@ function loadTransactions(filters: {
   }
   sql += " ORDER BY date ASC, id ASC";
   const rows = db.prepare(sql).all(...params) as Array<{
+    id: number;
     date: string;
     ticker: string;
     exchange: string;
@@ -243,9 +255,13 @@ function loadTransactions(filters: {
     external_id: string | null;
     notes: string | null;
     fx_rate_to_aud: number | null;
+    broker: string | null;
+    custody: string | null;
+    source: string | null;
   }>;
 
   return rows.map((r) => ({
+    id: r.id,
     date: r.date,
     ticker: r.ticker,
     exchange: r.exchange,
@@ -258,6 +274,9 @@ function loadTransactions(filters: {
     externalId: r.external_id,
     notes: r.notes,
     fxRateToAud: r.fx_rate_to_aud,
+    broker: r.broker,
+    custody: r.custody,
+    source: r.source,
   }));
 }
 
@@ -381,8 +400,24 @@ registerPerformanceRoutes(app, { getDb, loadTransactions });
 registerExportRoutes(app, { getDb, dbPath: getDbPath() });
 registerReconcileRoutes(app, { getDb });
 registerStakeDrpRoutes(app, { getDb });
-registerTaxRoutes(app, { getDb, loadTransactions, priceMapsFromCache });
-registerGainsRoutes(app, { getDb, loadTransactions, priceMapsFromCache });
+function loadPlatformFifoBrokers(): string[] {
+  return parsePlatformFifoBrokers(loadAppSettings().platform_fifo_brokers);
+}
+
+registerTaxRoutes(app, {
+  getDb,
+  loadTransactions,
+  priceMapsFromCache,
+  loadParcelTakes: () => loadParcelTakes(db),
+  loadPlatformFifoBrokers,
+});
+registerGainsRoutes(app, {
+  getDb,
+  loadTransactions,
+  priceMapsFromCache,
+  loadParcelTakes: () => loadParcelTakes(db),
+  loadPlatformFifoBrokers,
+});
 
 const SQLITE_MAGIC = Buffer.from("SQLite format 3\0", "utf8");
 
@@ -479,7 +514,12 @@ app.get("/api/transactions", (c) => {
     params.push(exchange.toUpperCase());
   }
   sql += " ORDER BY date DESC, id DESC";
-  return c.json(db.prepare(sql).all(...params));
+  const rows = db.prepare(sql).all(...params) as Array<{
+    id: number;
+    type: string;
+    quantity: number;
+  }>;
+  return c.json(attachParcelInfo(db, rows));
 });
 
 app.get("/api/meta/filters", (c) => {
@@ -593,6 +633,195 @@ app.post("/api/transactions", async (c) => {
   );
 });
 
+/**
+ * POST /api/tax/confirm-sale — record a sell of N units using the same
+ * parcel pick as the ticker "If you sell" estimate (FIFO or min-CGT),
+ * writing which buy/DRP parcels were consumed (or partially consumed).
+ */
+app.post("/api/tax/confirm-sale", async (c) => {
+  const body = await c.req.json<{
+    ticker?: string;
+    exchange?: string;
+    quantity?: number;
+    disposedDate?: string;
+    lotMatching?: LotMatchingMethod;
+    portfolioId?: number;
+    taxProfileId?: number;
+    inflationRate?: number;
+    regime?: CgtRegime;
+    broker?: string;
+  }>();
+
+  const ticker = (body.ticker || "").trim().toUpperCase();
+  const exchange = (body.exchange || "ASX").trim().toUpperCase();
+  const quantity = Number(body.quantity);
+  const disposedDate = body.disposedDate || new Date().toISOString().slice(0, 10);
+  const matching: LotMatchingMethod =
+    body.lotMatching === "min_cgt" ? "min_cgt" : "fifo";
+  const regime: CgtRegime = body.regime ?? "auto_by_date";
+  const portfolioId = body.portfolioId;
+
+  if (!ticker || !Number.isFinite(quantity) || quantity <= 0) {
+    return c.json({ error: "ticker and a positive quantity are required" }, 400);
+  }
+  if (!portfolioId) {
+    return c.json(
+      { error: "pick a portfolio to record the sale against" },
+      400,
+    );
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(disposedDate)) {
+    return c.json({ error: "disposedDate must be yyyy-mm-dd" }, 400);
+  }
+
+  const txs = loadTransactions({
+    portfolioId,
+    ticker,
+    exchange,
+  });
+  const maps = priceMapsFromCache();
+  const recordedTakes = loadParcelTakes(db);
+  const { openLots } = computeLots(txs, maps.fxRates, {
+    recordedTakes,
+    platformFifoBrokers: loadPlatformFifoBrokers(),
+  });
+  const lots = openLots.filter(
+    (l) => l.ticker === ticker && l.exchange === exchange,
+  );
+
+  const holdings = computeHoldings(txs, maps);
+  const holding = holdings.find(
+    (h) => h.ticker === ticker && h.exchange === exchange,
+  );
+  const proceedsPerUnitAud =
+    holding?.marketValueAud != null && holding.quantity > 0
+      ? holding.marketValueAud / holding.quantity
+      : null;
+  if (proceedsPerUnitAud == null || holding?.marketPrice == null) {
+    return c.json(
+      {
+        error:
+          "no AUD market price for this ticker — refresh prices on Holdings first",
+      },
+      400,
+    );
+  }
+
+  const profileRow = body.taxProfileId
+    ? (db
+        .prepare(
+          `SELECT label, marginal_rate, medicare_levy FROM tax_profiles WHERE id = ?`,
+        )
+        .get(body.taxProfileId) as
+        | { label: string; marginal_rate: number; medicare_levy: number }
+        | undefined)
+    : (db
+        .prepare(
+          `SELECT label, marginal_rate, medicare_levy FROM tax_profiles
+           ORDER BY is_default DESC, id ASC LIMIT 1`,
+        )
+        .get() as
+        | { label: string; marginal_rate: number; medicare_levy: number }
+        | undefined);
+  if (!profileRow) {
+    return c.json({ error: "no tax profile found — set one up in Settings" }, 400);
+  }
+
+  const estimate = estimateHypotheticalSale({
+    openLots: lots,
+    quantity,
+    proceedsPerUnitAud,
+    disposedDate,
+    matching,
+    regime,
+    profile: {
+      label: profileRow.label,
+      marginalRate: profileRow.marginal_rate,
+      medicareLevy: profileRow.medicare_levy,
+    },
+    annualInflationRate: body.inflationRate,
+  });
+
+  if (estimate.quantitySold <= 0 || estimate.parcels.length === 0) {
+    return c.json({ error: "no matching parcels to sell" }, 400);
+  }
+  if (estimate.parcels.some((p) => p.acquireTxId == null)) {
+    return c.json(
+      { error: "parcels are missing ledger ids — cannot record the sale" },
+      400,
+    );
+  }
+
+  const currency = (holding.currency || defaultCurrencyForExchange(exchange)).toUpperCase();
+  const price = holding.marketPrice;
+  const amount = price * estimate.quantitySold;
+  const fxRatesHist = await resolveHistoricalFxRates([
+    { currency, date: disposedDate },
+  ]);
+  const fxRate = fxRateNear(fxRatesHist, currency, disposedDate);
+  const matchingLabel = matching === "min_cgt" ? "minimize CGT" : "FIFO";
+  const notes = `Recorded ${matchingLabel} · ${estimate.parcels.length} parcel(s)`;
+  const externalId = `confirm-sale|${disposedDate}|${exchange}|${ticker}|${estimate.quantitySold}|${Date.now()}`;
+
+  const run = db.transaction(() => {
+    const info = db
+      .prepare(
+        `INSERT INTO transactions
+          (portfolio_id, account_id, import_batch_id, date, ticker, exchange, type, quantity, price, amount, brokerage, currency, external_id, notes, source, broker, custody, fx_rate_to_aud)
+         VALUES (?, ?, NULL, ?, ?, ?, 'sell', ?, ?, ?, 0, ?, ?, ?, 'confirm-sale', ?, ?, ?)`,
+      )
+      .run(
+        portfolioId,
+        portfolioId,
+        disposedDate,
+        ticker,
+        exchange,
+        estimate.quantitySold,
+        price,
+        amount,
+        currency,
+        externalId,
+        notes,
+        body.broker ?? null,
+        body.broker ?? null,
+        fxRate,
+      );
+    const sellId = Number(info.lastInsertRowid);
+    const insDisp = db.prepare(
+      `INSERT INTO parcel_disposals
+        (sell_transaction_id, acquire_transaction_id, quantity, cost_base_aud, proceeds_aud, matching)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    );
+    for (const p of estimate.parcels) {
+      insDisp.run(
+        sellId,
+        p.acquireTxId,
+        p.quantity,
+        p.costBaseAud,
+        p.proceedsAud,
+        matching,
+      );
+    }
+    return sellId;
+  });
+
+  const sellId = run();
+  const sell = db.prepare("SELECT * FROM transactions WHERE id = ?").get(sellId);
+  return c.json(
+    {
+      ok: true,
+      sell,
+      matching,
+      quantitySold: estimate.quantitySold,
+      unmatchedQuantity: estimate.unmatchedQuantity,
+      tax: estimate.tax,
+      capitalGain: estimate.capitalGain,
+      parcels: estimate.parcels,
+    },
+    201,
+  );
+});
+
 app.patch("/api/transactions/:id", async (c) => {
   const id = Number(c.req.param("id"));
   const existing = db
@@ -687,6 +916,16 @@ app.delete("/api/transactions/:id", (c) => {
   const row = db
     .prepare("SELECT ticker, exchange FROM transactions WHERE id = ?")
     .get(id) as { ticker: string; exchange: string } | undefined;
+  const blocked = acquireTxsBlockedByParcels(db, [id]);
+  if (blocked.length) {
+    return c.json(
+      {
+        error:
+          "this buy/DRP is recorded as a sold parcel — delete the matching sell first",
+      },
+      409,
+    );
+  }
   const info = db.prepare("DELETE FROM transactions WHERE id = ?").run(id);
   if (info.changes === 0) return c.json({ error: "not found" }, 404);
   if (row) purgeOrphanedPriceCache([row]);
@@ -698,6 +937,25 @@ app.post("/api/transactions/delete", async (c) => {
   const body = await c.req.json<{ ids?: number[] }>();
   const ids = (body.ids ?? []).map(Number).filter((n) => !Number.isNaN(n));
   if (!ids.length) return c.json({ error: "ids required" }, 400);
+  const types = db
+    .prepare(
+      `SELECT id, type FROM transactions WHERE id IN (${ids.map(() => "?").join(",")})`,
+    )
+    .all(...ids) as Array<{ id: number; type: string }>;
+  const sellIds = types.filter((t) => t.type === "sell").map((t) => t.id);
+  const otherIds = types.filter((t) => t.type !== "sell").map((t) => t.id);
+  const blocked = acquireTxsBlockedByParcels(db, otherIds).filter(
+    (id) => !sellIds.includes(id),
+  );
+  if (blocked.length) {
+    return c.json(
+      {
+        error:
+          "a selected buy/DRP is recorded as a sold parcel — delete the matching sell first (or include that sell in the selection)",
+      },
+      409,
+    );
+  }
   const affected = db
     .prepare(
       `SELECT DISTINCT ticker, exchange FROM transactions WHERE id IN (${ids.map(() => "?").join(",")})`,
@@ -706,7 +964,12 @@ app.post("/api/transactions/delete", async (c) => {
   const del = db.prepare("DELETE FROM transactions WHERE id = ?");
   const run = db.transaction((list: number[]) => {
     let n = 0;
-    for (const id of list) n += del.run(id).changes;
+    // Sells first so ON DELETE CASCADE clears parcel_disposals before buys.
+    for (const id of sellIds) n += del.run(id).changes;
+    for (const id of list) {
+      if (sellIds.includes(id)) continue;
+      n += del.run(id).changes;
+    }
     return n;
   });
   const deleted = run(ids);
@@ -993,6 +1256,81 @@ app.post("/api/import", async (c) => {
   });
 });
 
+/**
+ * POST /api/import/preview — dry run of /api/import. Same parsing + broker/
+ * custody/source resolution, but never opens a DB transaction, so the UI can
+ * show the full transaction table before the user confirms.
+ */
+app.post("/api/import/preview", async (c) => {
+  const body = await c.req.parseBody();
+  const file = body["file"];
+  const parserField = (body["broker"] as string | undefined) || "auto";
+  const custodyBroker =
+    (body["custody"] as string | undefined) ||
+    (body["sourceBroker"] as string | undefined) ||
+    null;
+  const sourceOverride = (body["source"] as string | undefined) || null;
+
+  if (!file || typeof file === "string") {
+    return c.json({ error: "file is required" }, 400);
+  }
+
+  const ab = await file.arrayBuffer();
+  const filename = file.name || "upload.csv";
+  const forced = resolveForcedBroker(
+    parserField as BrokerId | "auto" | "" | null,
+  );
+  const parsed = await parseBrokerFile({
+    content: Buffer.from(ab),
+    filename,
+    broker: forced ?? "auto",
+  });
+
+  if (
+    filename.toLowerCase().endsWith(".pdf") &&
+    parsed.transactions.length === 0 &&
+    parsed.warnings.some((w) => w.severity === "error")
+  ) {
+    return c.json(
+      {
+        error: parsed.warnings.find((w) => w.severity === "error")?.message,
+        warnings: parsed.warnings,
+        layoutId: parsed.layoutId ?? null,
+        parsed: 0,
+      },
+      400,
+    );
+  }
+
+  const source = sourceOverride || `file:${parsed.layoutId || parsed.broker}`;
+  const custody = custodyBroker || inferCustodyFromParser(parsed.broker);
+
+  return c.json({
+    filename,
+    parser: parsed.broker,
+    layoutId: parsed.layoutId ?? null,
+    confidence: parsed.confidence ?? null,
+    source,
+    custody,
+    parsed: parsed.transactions.length,
+    skipped: parsed.skippedRows,
+    transactions: parsed.transactions.map((t) => ({
+      date: t.date,
+      ticker: t.ticker.toUpperCase(),
+      exchange: t.exchange,
+      type: t.type,
+      quantity: t.quantity,
+      price: t.price,
+      amount: t.amount,
+      brokerage: t.brokerage,
+      currency: t.currency,
+      externalId: t.externalId,
+      notes: t.notes,
+    })),
+    warnings: parsed.warnings,
+  });
+});
+
 // ─── Import history ─────────────────────────────────────────────────────────
 
 /**
@@ -1010,6 +1348,14 @@ app.post("/api/import", async (c) => {
 app.get("/api/import/history", (c) => {
   const portfolioId = c.req.query("portfolioId") || c.req.query("accountId");
   const pid = portfolioId ? Number(portfolioId) : undefined;
+  const sourceFilter = c.req.query("source") || undefined;
+  // Stake DRP check writes its own batches; keep them off the regular
+  // Import-file history unless the caller asks for that source.
+  const src = (col: string) =>
+    sourceFilter
+      ? ` AND ${col} = ?`
+      : ` AND (${col} IS NULL OR ${col} != 'stake-drp-detect')`;
+  const sourceParams: unknown[] = sourceFilter ? [sourceFilter] : [];
 
   const filesSql = `
     SELECT ib.filename, ib.broker, ib.source, ib.created_at AS importedAt,
@@ -1017,18 +1363,28 @@ app.get("/api/import/history", (c) => {
            ib.skipped_count AS skippedCount, ib.portfolio_id AS portfolioId,
            p.name AS portfolioName,
            (SELECT COUNT(*) FROM import_batches x
-              WHERE x.filename = ib.filename AND x.portfolio_id = ib.portfolio_id) AS importCount
+              WHERE x.filename = ib.filename AND x.portfolio_id = ib.portfolio_id
+                ${src("x.source")}) AS importCount
     FROM import_batches ib
     JOIN portfolios p ON p.id = ib.portfolio_id
     WHERE ib.id IN (
       SELECT MAX(id) FROM import_batches
-      ${pid ? "WHERE portfolio_id = ?" : ""}
+      WHERE 1=1
+      ${pid ? "AND portfolio_id = ?" : ""}
+      ${src("source")}
       GROUP BY portfolio_id, filename
     )
     ${pid ? "AND ib.portfolio_id = ?" : ""}
+    ${src("ib.source")}
     ORDER BY ib.created_at DESC
   `;
-  const filesParams = pid ? [pid, pid] : [];
+  const filesParams = [
+    ...sourceParams, // importCount subquery
+    ...(pid ? [pid] : []),
+    ...sourceParams, // inner MAX
+    ...(pid ? [pid] : []),
+    ...sourceParams, // outer
+  ];
   const files = db.prepare(filesSql).all(...filesParams) as Array<{
     filename: string;
     broker: string | null;
@@ -1058,10 +1414,15 @@ app.get("/api/import/history", (c) => {
   const lastImportedSql = `
     SELECT broker, MAX(created_at) AS lastImportedAt
     FROM import_batches
-    ${pid ? "WHERE portfolio_id = ?" : ""}
+    WHERE 1=1
+    ${pid ? "AND portfolio_id = ?" : ""}
+    ${src("source")}
     GROUP BY broker
   `;
-  const lastImported = db.prepare(lastImportedSql).all(...(pid ? [pid] : [])) as Array<{
+  const lastImported = db.prepare(lastImportedSql).all(
+    ...(pid ? [pid] : []),
+    ...sourceParams,
+  ) as Array<{
     broker: string | null;
     lastImportedAt: string;
   }>;
@@ -1879,6 +2240,7 @@ const SETTINGS_DEFAULTS: Record<string, string> = {
   yahoo_refresh_enabled: "0",
   yahoo_auto_refresh_minutes: "5",
   us_withholding_pct: "15",
+  platform_fifo_brokers: JSON.stringify(["betashares_direct"]),
 };
 
 function loadAppSettings(): Record<string, string> {
@@ -1923,6 +2285,7 @@ app.put("/api/settings", async (c) => {
     "yahoo_refresh_enabled",
     "yahoo_auto_refresh_minutes",
     "us_withholding_pct",
+    "platform_fifo_brokers",
   ]);
 
   for (const [key, raw] of Object.entries(incoming)) {
@@ -1954,6 +2317,30 @@ app.put("/api/settings", async (c) => {
         );
       }
       value = String(n);
+    } else if (key === "platform_fifo_brokers") {
+      let list: unknown = raw;
+      if (typeof raw === "string") {
+        try {
+          list = JSON.parse(raw);
+        } catch {
+          return c.json(
+            { error: "platform_fifo_brokers must be a JSON array of broker ids" },
+            400,
+          );
+        }
+      }
+      if (
+        !Array.isArray(list) ||
+        list.some((x) => typeof x !== "string")
+      ) {
+        return c.json(
+          { error: "platform_fifo_brokers must be a JSON array of broker ids" },
+          400,
+        );
+      }
+      value = JSON.stringify(
+        list.map((s) => s.trim().toLowerCase()).filter((s) => s.length > 0),
+      );
     } else {
       value = String(raw);
     }
@@ -2392,8 +2779,11 @@ app.get("/api/instruments/seeds", (c) => c.json(listInstrumentSeeds()));
 
 /**
  * GET assumptions for a ticker.
- * - Default: cache → seed (no Yahoo)
- * - ?refresh=1: live Yahoo enrich (respects cool-down unless force=1)
+ * - Default: cache → seed → (if neither has a name) one cheap Yahoo quote
+ *   lookup for the display name only, cached from then on. Never blocks or
+ *   errors the response — About just stays name-less on failure/cool-down.
+ * - ?refresh=1: full live Yahoo enrich of growth/yield too (respects
+ *   cool-down unless force=1)
  */
 app.get("/api/instruments/:ticker", async (c) => {
   const ticker = c.req.param("ticker").toUpperCase().replace(/\.AX$/i, "");
@@ -2407,7 +2797,37 @@ app.get("/api/instruments/:ticker", async (c) => {
       return c.json({ ...cached, fromCache: true });
     }
     const seed = resolveInstrumentFromSeed(ticker, exchange);
-    return c.json({ ...seed, fromCache: false });
+    if (seed.name || seed.issuer || seed.productUrl) {
+      return c.json({ ...seed, fromCache: false });
+    }
+
+    // Unseeded ticker — try once to resolve just a display name via a single
+    // Yahoo quote call (cheap; not the heavier dividends+history refresh).
+    // Growth/yield stay generic defaults until an explicit ?refresh=1.
+    try {
+      assertYahooAllowed(db);
+      const symbol = toYahooSymbol(ticker, exchange);
+      const quotes = await fetchYahooQuotesBulk([symbol]);
+      recordYahooSuccess(db);
+      const name = quotes.get(symbol.toUpperCase())?.name || null;
+      const enriched: InstrumentAssumptions = {
+        ...seed,
+        name: name ?? undefined,
+        sources: [...seed.sources, name ? "yahoo:name" : "yahoo:name_not_found"],
+        notes: [
+          ...seed.notes,
+          name
+            ? `Name from Yahoo quote (${symbol}).`
+            : `Yahoo quote for ${symbol} had no name on file.`,
+        ],
+        resolvedAt: new Date().toISOString(),
+      };
+      writeInstrumentCache(enriched);
+      return c.json({ ...enriched, fromCache: false });
+    } catch (e) {
+      recordYahooFailure(db, e);
+      return c.json({ ...seed, fromCache: false });
+    }
   }
 
   // Manual refresh — may hit Yahoo
@@ -2477,8 +2897,9 @@ if (serveWeb && webDistAbs) {
 }
 
 const port = Number(process.env.PORT ?? 8787);
-console.log(`yields api listening on http://localhost:${port}`);
-serve({ fetch: app.fetch, port });
+const hostname = process.env.HOST ?? "0.0.0.0";
+console.log(`risu api listening on http://${hostname}:${port}`);
+serve({ fetch: app.fetch, port, hostname });
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {

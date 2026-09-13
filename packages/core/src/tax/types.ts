@@ -26,6 +26,17 @@ export type TaxProfile = {
  */
 export type CgtRegime = "discount_50" | "indexation_min30" | "auto_by_date";
 
+/**
+ * How a sell is matched against open parcels.
+ *
+ * - `fifo` — oldest lot first (default reconstruction).
+ * - `min_cgt` — specific identification: consume lots with the lowest
+ *   estimated taxable gain per unit first (losses, then smallest
+ *   post-discount / post-indexation gains). Respects the 1 Jul 2027
+ *   cutover via the same `CgtRegime` as the tax calculation.
+ */
+export type LotMatchingMethod = "fifo" | "min_cgt";
+
 /** Cutover used by `auto_by_date` regime (inclusive new rules). */
 export const CGT_REGIME_CUTOVER_ISO = "2027-07-01";
 

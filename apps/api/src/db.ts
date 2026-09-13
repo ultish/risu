@@ -146,6 +146,17 @@ function migrate(db: Database.Database) {
       value TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS parcel_disposals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sell_transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+      acquire_transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
+      quantity REAL NOT NULL,
+      cost_base_aud REAL NOT NULL,
+      proceeds_aud REAL NOT NULL,
+      matching TEXT NOT NULL DEFAULT 'fifo',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     /** Planner instrument assumptions — filled on manual refresh only */
     CREATE TABLE IF NOT EXISTS instrument_cache (
       ticker TEXT NOT NULL,
@@ -198,6 +209,21 @@ function migrate(db: Database.Database) {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_tx_source ON transactions(source);`);
   }
 
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS parcel_disposals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sell_transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE CASCADE,
+      acquire_transaction_id INTEGER NOT NULL REFERENCES transactions(id) ON DELETE RESTRICT,
+      quantity REAL NOT NULL,
+      cost_base_aud REAL NOT NULL,
+      proceeds_aud REAL NOT NULL,
+      matching TEXT NOT NULL DEFAULT 'fifo',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_parcel_sell ON parcel_disposals(sell_transaction_id);
+    CREATE INDEX IF NOT EXISTS idx_parcel_acquire ON parcel_disposals(acquire_transaction_id);
+  `);
+
   try {
     db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_portfolio_external
@@ -218,6 +244,7 @@ function seedAppSettings(db: Database.Database) {
   const defaults: Array<[string, string]> = [
     ["yahoo_refresh_enabled", "0"],
     ["us_withholding_pct", "15"],
+    ["platform_fifo_brokers", JSON.stringify(["betashares_direct"])],
   ];
   const ins = db.prepare(
     `INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?)`,

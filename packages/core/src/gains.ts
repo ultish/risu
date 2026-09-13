@@ -6,7 +6,7 @@
  * snapshot.
  */
 import { auFinancialYear } from "./income.js";
-import { computeLots } from "./lots.js";
+import { computeLots, type RecordedParcelTake } from "./lots.js";
 import type { PerformancePoint } from "./performance.js";
 import type { ParsedTransaction } from "./types.js";
 
@@ -20,8 +20,15 @@ export type RealisedGainFyTotal = {
 export function summarizeRealisedGains(
   transactions: ParsedTransaction[],
   fxRates: Record<string, number | null | undefined> = {},
+  opts?: {
+    recordedTakes?: RecordedParcelTake[];
+    platformFifoBrokers?: string[];
+  },
 ): RealisedGainFyTotal[] {
-  const { disposals } = computeLots(transactions, fxRates);
+  const { disposals } = computeLots(transactions, fxRates, {
+    recordedTakes: opts?.recordedTakes,
+    platformFifoBrokers: opts?.platformFifoBrokers,
+  });
   const byFy = new Map<string, RealisedGainFyTotal>();
   for (const d of disposals) {
     const fy = auFinancialYear(d.disposedDate);

@@ -136,6 +136,8 @@ export type YahooQuoteSnapshot = {
   symbol: string;
   price: number;
   currency: string | null;
+  /** Company/fund display name, when Yahoo's quote response includes one. */
+  name?: string | null;
 };
 
 function chunkSymbols(symbols: string[], size = YAHOO_BULK_CHUNK): string[][] {
@@ -292,7 +294,10 @@ export function buildYahooQuoteUrl(symbols: string[]): string {
   ].join(",");
   const url = new URL(YAHOO_QUOTE);
   url.searchParams.set("symbols", joined);
-  url.searchParams.set("fields", "regularMarketPrice,currency,symbol");
+  url.searchParams.set(
+    "fields",
+    "regularMarketPrice,currency,symbol,longName,shortName",
+  );
   return url.toString();
 }
 
@@ -435,6 +440,8 @@ export function parseYahooQuotePayload(
         symbol?: string;
         regularMarketPrice?: number;
         currency?: string;
+        longName?: string;
+        shortName?: string;
       }>;
     };
   };
@@ -446,6 +453,7 @@ export function parseYahooQuotePayload(
       symbol: sym,
       price,
       currency: row.currency ?? null,
+      name: row.longName || row.shortName || null,
     });
   }
   return out;
@@ -700,7 +708,7 @@ export async function fetchYahooQuotesBulk(
           url.searchParams.set("symbols", joined);
           url.searchParams.set(
             "fields",
-            "regularMarketPrice,currency,symbol",
+            "regularMarketPrice,currency,symbol,longName,shortName",
           );
           if (session?.crumb) url.searchParams.set("crumb", session.crumb);
           return url.toString();

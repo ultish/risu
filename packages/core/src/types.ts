@@ -30,6 +30,8 @@ export const TransactionType = z.enum([
 export type TransactionType = z.infer<typeof TransactionType>;
 
 export const ParsedTransaction = z.object({
+  /** Ledger row id when loaded from SQLite; omitted for freshly parsed imports. */
+  id: z.number().optional(),
   /** Trade / allotment date (ISO yyyy-mm-dd) */
   date: z.string(),
   ticker: z.string(),
@@ -45,6 +47,11 @@ export const ParsedTransaction = z.object({
   /** Broker contract note / row id for dedupe */
   externalId: z.string().nullable(),
   notes: z.string().nullable(),
+  /** Custody / broker when loaded from the ledger (e.g. betashares_direct). */
+  broker: z.string().nullable().optional(),
+  custody: z.string().nullable().optional(),
+  /** How the row entered the ledger (e.g. file:betashares_direct.platform_annual, confirm-sale). */
+  source: z.string().nullable().optional(),
   /** Raw row from file for debugging */
   raw: z.record(z.string(), z.unknown()).optional(),
   /**

@@ -17,6 +17,12 @@ type Props = {
   portfolioId: number | "all";
   /** Bump to force a refetch (e.g. after an import completes elsewhere). */
   refreshSignal?: number;
+  /** Restrict to one import_batches.source (e.g. stake-drp-detect). */
+  source?: string;
+  title?: string;
+  /** Hide the per-broker rollup; just list files. */
+  filesOnly?: boolean;
+  defaultShowFiles?: boolean;
 };
 
 function formatDateTime(iso: string): string {
@@ -26,22 +32,30 @@ function formatDateTime(iso: string): string {
   return d.toLocaleString();
 }
 
-export default function ImportHistoryPanel({ portfolioId, refreshSignal }: Props) {
+export default function ImportHistoryPanel({
+  portfolioId,
+  refreshSignal,
+  source,
+  title = "Already imported",
+  filesOnly = false,
+  defaultShowFiles = false,
+}: Props) {
   const [history, setHistory] = useState<ImportHistory | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [showFiles, setShowFiles] = useState(false);
+  const [showFiles, setShowFiles] = useState(defaultShowFiles);
 
   const load = useCallback(async () => {
     setError(null);
     try {
       const h = await fetchImportHistory(
         portfolioId === "all" ? undefined : portfolioId,
+        source ? { source } : undefined,
       );
       setHistory(h);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
-  }, [portfolioId]);
+  }, [portfolioId, source]);
 
   useEffect(() => {
     void load();
@@ -51,7 +65,8 @@ export default function ImportHistoryPanel({ portfolioId, refreshSignal }: Props
   if (error) {
     return <p className="text-xs text-red-400">Import history: {error}</p>;
   }
-  if (!history || history.byBroker.length === 0) {
+  if (!history) return null;
+  if (filesOnly ? history.files.length === 0 : history.byBroker.length === 0 && history.files.length === 0) {
     return null;
   }
 
@@ -59,7 +74,7 @@ export default function ImportHistoryPanel({ portfolioId, refreshSignal }: Props
     <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-3 text-sm">
       <div className="mb-2 flex items-center justify-between">
         <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
-          Already imported
+          {title}
         </span>
         <button
           type="button"
@@ -69,6 +84,7 @@ export default function ImportHistoryPanel({ portfolioId, refreshSignal }: Props
           Refresh
         </button>
       </div>
+      {!filesOnly && history.byBroker.length > 0 && (
       <div className="overflow-x-auto">
         <table className="w-full text-left text-xs">
           <thead className="text-gray-500">
@@ -95,16 +111,19 @@ export default function ImportHistoryPanel({ portfolioId, refreshSignal }: Props
           </tbody>
         </table>
       </div>
+      )}
 
+      {!filesOnly && (
       <button
         type="button"
         onClick={() => setShowFiles((v) => !v)}
-        className="mt-3 text-xs text-emerald-400 hover:text-emerald-300"
+        className={`text-xs text-emerald-400 hover:text-emerald-300 ${history.byBroker.length > 0 ? "mt-3" : ""}`}
       >
         {showFiles ? "Hide" : "Show"} imported files ({history.files.length})
       </button>
+      )}
 
-      {showFiles && (
+      {(showFiles || filesOnly) && history.files.length > 0 && (
         <div className="mt-2 max-h-64 overflow-y-auto">
           <table className="w-full text-left text-xs">
             <thead className="sticky top-0 bg-gray-900 text-gray-500">
@@ -113,7 +132,7 @@ export default function ImportHistoryPanel({ portfolioId, refreshSignal }: Props
                 <th className="pb-1 pr-4">Portfolio</th>
                 <th className="pb-1 pr-4">Broker</th>
                 <th className="pb-1 pr-4">Rows</th>
-                <th className="pb-1">Last imported</th>
+                <th className="pb-1">{filesOnly ? "Last run" : "Last imported"}</th>
               </tr>
             </thead>
             <tbody>
@@ -126,7 +145,7 @@ export default function ImportHistoryPanel({ portfolioId, refreshSignal }: Props
                     {f.filename}
                     {f.importCount > 1 && (
                       <span className="ml-1 text-gray-500">
-                        (imported {f.importCount}×)
+                        ({filesOnly ? "used" : "imported"} {f.importCount}×)
                       </span>
                     )}
                   </td>

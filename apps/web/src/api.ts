@@ -29,6 +29,24 @@ export type Holding = {
   marketValueAud: number | null;
 };
 
+export type TxParcelAllocation = {
+  acquireTxId: number;
+  acquiredDate: string;
+  quantity: number;
+  costBaseAud: number;
+  proceedsAud: number;
+};
+
+export type TxParcelInfo = {
+  kind: "acquire" | "sell";
+  status?: "partial" | "sold";
+  soldQuantity?: number;
+  remainingQuantity?: number;
+  lastSoldDate?: string | null;
+  matching?: LotMatchingMethod;
+  allocations?: TxParcelAllocation[];
+};
+
 export type TxRow = {
   id: number;
   date: string;
@@ -45,6 +63,7 @@ export type TxRow = {
   broker: string | null;
   source: string | null;
   custody: string | null;
+  parcel?: TxParcelInfo;
 };
 
 export type FilterMeta = {
@@ -224,6 +243,36 @@ export async function importFile(opts: {
   );
 }
 
+/** Dry-run of /api/import — parses the file and returns every transaction it would write, but never touches the DB. */
+export type ImportPreviewResult = {
+  filename: string;
+  parser: string;
+  layoutId: string | null;
+  confidence: "high" | "low" | "none" | null;
+  source: string;
+  custody: string | null;
+  parsed: number;
+  skipped: number;
+  transactions: ReconcileParsedTx[];
+  warnings: Array<{ row?: number; message: string; severity?: string }>;
+};
+
+export async function previewImportFile(opts: {
+  file: File;
+  parser: string;
+  broker?: string;
+  source?: string;
+}) {
+  const fd = new FormData();
+  fd.append("file", opts.file);
+  fd.append("broker", opts.parser);
+  if (opts.broker) fd.append("custody", opts.broker);
+  if (opts.source) fd.append("source", opts.source);
+  return json<ImportPreviewResult>(
+    await fetch(`${BASE}/api/import/preview`, { method: "POST", body: fd }),
+  );
+}
+
 export type ImportHistoryFile = {
   filename: string;
   broker: string | null;
@@ -252,9 +301,13 @@ export type ImportHistory = {
 /** Which files have already been imported (deduped by filename — the latest
  * attempt wins), plus the latest transaction date already in the ledger per
  * broker/custody. Helps answer "have I imported this year's statement yet". */
-export async function fetchImportHistory(portfolioId?: number) {
+export async function fetchImportHistory(
+  portfolioId?: number,
+  opts?: { source?: string },
+) {
   const p = new URLSearchParams();
   if (portfolioId != null) p.set("portfolioId", String(portfolioId));
+  if (opts?.source) p.set("source", opts.source);
   const qsStr = p.toString();
   return json<ImportHistory>(
     await fetch(`${BASE}/api/import/history${qsStr ? `?${qsStr}` : ""}`),
@@ -274,6 +327,8 @@ export type StakeDrpProposed = {
   externalId: string | null;
   notes: string | null;
   fundedBy: string;
+  alreadyInLedger?: boolean;
+  alreadyHow?: string | null;
 };
 
 export type StakeDrpWarning = {
@@ -289,6 +344,8 @@ export type StakeDrpResult = {
   committed: boolean;
   inserted?: number;
   skippedExisting?: number;
+  alreadyInLedger?: number;
+  newCount?: number;
 };
 
 /**
@@ -545,6 +602,8 @@ export type TaxProfileDto = {
 
 export type CgtRegime = "discount_50" | "indexation_min30" | "auto_by_date";
 
+export type LotMatchingMethod = "fifo" | "min_cgt";
+
 export type PlannerTaxProfile = {
   label: string;
   marginalRate: number;
@@ -683,6 +742,7 @@ export type RealisedCgtLineDto = {
   capitalGain: number;
   longTerm: boolean;
   appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+  parcelMatch?: "fifo" | "min_cgt" | "recorded";
 };
 
 export type FyTaxTotalDto = {
@@ -736,6 +796,7 @@ export type FyTaxEstimateDto = {
   notes: string[];
   taxProfile: { id: number; label: string; marginalRate: number; medicareLevy: number };
   regime: CgtRegime;
+  lotMatching: LotMatchingMethod;
   filters: { portfolioId: number | null; broker: string | null; source: string | null };
 };
 
@@ -743,15 +804,131 @@ export async function fetchFyTaxEstimate(opts: {
   portfolioId?: number | null;
   taxProfileId?: number;
   regime?: CgtRegime;
+  lotMatching?: LotMatchingMethod;
   inflationRate?: number;
 }) {
   const params = new URLSearchParams();
   if (opts.portfolioId != null) params.set("portfolioId", String(opts.portfolioId));
   if (opts.taxProfileId != null) params.set("taxProfileId", String(opts.taxProfileId));
   if (opts.regime) params.set("regime", opts.regime);
+  if (opts.lotMatching) params.set("lotMatching", opts.lotMatching);
   if (opts.inflationRate != null) params.set("inflationRate", String(opts.inflationRate));
   return json<FyTaxEstimateDto>(
     await fetch(`${BASE}/api/tax/fy-estimate?${params.toString()}`),
+  );
+}
+
+export type SellEstimateParcelDto = {
+  ticker: string;
+  exchange: string;
+  acquiredDate: string;
+  disposedDate: string;
+  quantity: number;
+  proceedsAud: number;
+  costBaseAud: number;
+  capitalGain: number;
+  longTerm: boolean;
+  appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+  acquireTxId?: number;
+};
+
+export type SellEstimateSummaryDto = {
+  matching: LotMatchingMethod;
+  quantitySold: number;
+  proceedsAud: number;
+  costBaseAud: number;
+  capitalGain: number;
+  taxableGain: number;
+  tax: number;
+  appliedRegime: Exclude<CgtRegime, "auto_by_date"> | null;
+};
+
+export type SellEstimateDto = SellEstimateSummaryDto & {
+  ticker: string;
+  exchange: string | null;
+  quantityRequested: number;
+  unmatchedQuantity: number;
+  proceedsPerUnitAud: number;
+  disposedDate: string;
+  parcels: SellEstimateParcelDto[];
+  comparison: {
+    fifo: SellEstimateSummaryDto;
+    min_cgt: SellEstimateSummaryDto;
+  };
+  notes: string[];
+  unitsHeld: number;
+  marketPrice: number | null;
+  currency: string | null;
+  openLots: Array<{
+    acquiredDate: string;
+    quantity: number;
+    costBaseAud: number;
+    unitCostAud: number;
+  }>;
+  taxProfile: { id: number; label: string; marginalRate: number; medicareLevy: number };
+  regime: CgtRegime;
+  lotMatching: LotMatchingMethod;
+  inflationRate: number | null;
+};
+
+export async function fetchSellEstimate(opts: {
+  ticker: string;
+  exchange?: string;
+  quantity: number;
+  lotMatching?: LotMatchingMethod;
+  regime?: CgtRegime;
+  inflationRate?: number;
+  disposedDate?: string;
+  taxProfileId?: number;
+  portfolioId?: number | null;
+  broker?: string;
+  source?: string;
+}) {
+  const params = new URLSearchParams();
+  params.set("ticker", opts.ticker);
+  if (opts.exchange) params.set("exchange", opts.exchange);
+  params.set("quantity", String(opts.quantity));
+  if (opts.lotMatching) params.set("lotMatching", opts.lotMatching);
+  if (opts.regime) params.set("regime", opts.regime);
+  if (opts.inflationRate != null) params.set("inflationRate", String(opts.inflationRate));
+  if (opts.disposedDate) params.set("disposedDate", opts.disposedDate);
+  if (opts.taxProfileId != null) params.set("taxProfileId", String(opts.taxProfileId));
+  if (opts.portfolioId != null) params.set("portfolioId", String(opts.portfolioId));
+  if (opts.broker) params.set("broker", opts.broker);
+  if (opts.source) params.set("source", opts.source);
+  return json<SellEstimateDto>(
+    await fetch(`${BASE}/api/tax/sell-estimate?${params.toString()}`),
+  );
+}
+
+export type ConfirmSaleResult = {
+  ok: true;
+  sell: TxRow;
+  matching: LotMatchingMethod;
+  quantitySold: number;
+  unmatchedQuantity: number;
+  tax: number;
+  capitalGain: number;
+  parcels: SellEstimateParcelDto[];
+};
+
+export async function confirmSale(body: {
+  ticker: string;
+  exchange?: string;
+  quantity: number;
+  disposedDate?: string;
+  lotMatching?: LotMatchingMethod;
+  portfolioId: number;
+  taxProfileId?: number;
+  inflationRate?: number;
+  broker?: string;
+}) {
+  return json<ConfirmSaleResult>(
+    await fetch(`${BASE}/api/tax/confirm-sale`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
   );
 }
 
@@ -885,6 +1062,7 @@ export async function putSettings(
     yahoo_refresh_enabled: string | boolean;
     yahoo_auto_refresh_minutes: string | number;
     us_withholding_pct: string | number;
+    platform_fifo_brokers: string;
   }>,
 ) {
   return json<SettingsResponse>(

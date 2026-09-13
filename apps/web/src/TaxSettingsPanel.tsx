@@ -5,7 +5,9 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import {
+  fetchSettings,
   fetchTaxProfiles,
+  putSettings,
   putTaxProfiles,
   type TaxProfileDto,
 } from "./api";
@@ -32,6 +34,28 @@ function toDraft(p: TaxProfileDto): DraftProfile {
   };
 }
 
+const PLATFORM_FIFO_BROKERS: Array<{ id: string; label: string }> = [
+  { id: "betashares_direct", label: "Betashares Direct" },
+  { id: "stake", label: "Stake" },
+  { id: "commsec", label: "CommSec" },
+  { id: "pocket", label: "Pocket" },
+  { id: "selfwealth", label: "Selfwealth" },
+  { id: "other", label: "Other" },
+];
+
+const DEFAULT_PLATFORM_FIFO = ["betashares_direct"];
+
+function parseBrokerList(raw: string | undefined): string[] {
+  if (raw == null || raw.trim() === "") return [...DEFAULT_PLATFORM_FIFO];
+  try {
+    const v = JSON.parse(raw) as unknown;
+    if (!Array.isArray(v)) return [...DEFAULT_PLATFORM_FIFO];
+    return v.map((x) => String(x));
+  } catch {
+    return [...DEFAULT_PLATFORM_FIFO];
+  }
+}
+
 function emptyDraft(): DraftProfile {
   return {
     key: `new-${Date.now()}`,
@@ -47,13 +71,23 @@ export function TaxSettingsPanel() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
+  const [fifoBrokers, setFifoBrokers] = useState<string[]>([
+    ...DEFAULT_PLATFORM_FIFO,
+  ]);
+  const [fifoSaved, setFifoSaved] = useState(false);
 
   const load = useCallback(async () => {
     setBusy(true);
     setError(null);
     try {
-      const rows = await fetchTaxProfiles();
+      const [rows, settings] = await Promise.all([
+        fetchTaxProfiles(),
+        fetchSettings().catch(() => null),
+      ]);
       setDrafts(rows.map(toDraft));
+      if (settings) {
+        setFifoBrokers(parseBrokerList(settings.settings.platform_fifo_brokers));
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -130,6 +164,29 @@ export function TaxSettingsPanel() {
       );
       setDrafts(savedRows.map(toDraft));
       setSaved(true);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleFifoBroker(id: string) {
+    setFifoSaved(false);
+    setFifoBrokers((list) =>
+      list.includes(id) ? list.filter((x) => x !== id) : [...list, id],
+    );
+  }
+
+  async function onSaveFifoBrokers() {
+    setBusy(true);
+    setError(null);
+    setFifoSaved(false);
+    try {
+      await putSettings({
+        platform_fifo_brokers: JSON.stringify(fifoBrokers),
+      });
+      setFifoSaved(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -255,6 +312,49 @@ export function TaxSettingsPanel() {
             max(this combined rate, 30%) on the indexed gain — no 50% discount.
           </li>
         </ul>
+      </div>
+
+      <div className="mt-6 border-t border-gray-800 pt-5">
+        <h3 className="mb-1 text-sm font-medium text-gray-100">
+          Brokers that report their own CGT (FIFO lock)
+        </h3>
+        <p className="mb-3 text-sm text-gray-400">
+          Imported statement sells from these brokers stay FIFO on the Tax
+          tab, even when Auto (minimize CGT) is on — they issue their own
+          tax report that way (Betashares Direct auto-rebalance is the
+          usual case). Untick a broker if you want minimize-CGT to apply
+          to its imported sells. Add trade and ticker “Confirm sale” are
+          never locked.
+        </p>
+        <div className="space-y-2">
+          {PLATFORM_FIFO_BROKERS.map((b) => (
+            <label
+              key={b.id}
+              className="flex items-center gap-2 text-sm text-gray-300"
+            >
+              <input
+                type="checkbox"
+                checked={fifoBrokers.includes(b.id)}
+                disabled={busy}
+                onChange={() => toggleFifoBroker(b.id)}
+              />
+              {b.label}
+            </label>
+          ))}
+        </div>
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => void onSaveFifoBrokers()}
+            className="rounded-lg bg-emerald-500 px-4 py-2 text-sm font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
+          >
+            {busy ? "Saving…" : "Save broker FIFO lock"}
+          </button>
+          {fifoSaved && (
+            <span className="text-xs text-emerald-300">Saved</span>
+          )}
+        </div>
       </div>
 
       <div className="mt-4">

@@ -32,8 +32,8 @@ Import your trades, refresh prices when you choose, and run “what if?” scena
 - **Separate portfolios** — e.g. yours and a partner’s — each with its own trades
 - **Import from real exports** — see [supported import formats](#supported-import-formats) below
 - **Add a trade by hand** when a file doesn’t cover it
-- **Holdings at a glance** — units, cost base, last price, unrealised gain/loss in **AUD**; click a row for a **per-ticker detail page**
-- **Full trade history** — search-friendly ledger; export to CSV when you need a copy
+- **Holdings at a glance** — units, cost base, last price, unrealised gain/loss in **AUD**; click a row for a **per-ticker detail page** (same click-through from the transactions ledger)
+- **Full trade history** — search-friendly ledger; click a ticker for its page; export to CSV when you need a copy
 - **Performance over time** — cost base vs market value chart; hover for any month, zoom the range you care about
 - **Allocation, gains, and income charts** — where your value sits by ticker, realised vs unrealised gain by financial year, and dividend income by financial year
 - **One-click backup** of your whole local database (dated file you can stash offline)
@@ -49,8 +49,9 @@ Import your trades, refresh prices when you choose, and run “what if?” scena
 ### Tax sketches & planning (not a tax return)
 
 - **Tax profiles** — set rough marginal rate and Medicare for illustrations
-- **FY tax estimate (Tax tab)** — roughly how much tax you owe for a financial year: dividend income tax plus realised CGT on your actual sells, combined. Capital gains use real **FIFO per-parcel cost base** (not average cost), so each sold parcel's own acquisition date decides whether the pre- or post–1 Jul 2027 CGT rules apply — per disposal, not per holding. Expandable rows show every underlying parcel: acquired/disposed dates, proceeds, cost base, gain, and tax
-- **DRP check** — spot possible missing reinvestment lots (suggestions only; it won’t invent history)
+- **FY tax estimate (Tax tab)** — roughly how much tax you owe for a financial year: dividend income tax plus realised CGT on your actual sells, combined. Capital gains use real **per-parcel cost base** (not average cost), so each sold parcel's own acquisition date decides whether the pre- or post–1 Jul 2027 CGT rules apply — per disposal, not per holding. Match parcels **FIFO** (oldest first) or **minimize CGT** (pick lots that reduce estimated tax, except **Betashares Direct statement sells**, which stay FIFO to match that platform’s own tax report). The 50% discount and indexed options remain as reference. Expandable rows show every underlying parcel: acquired/disposed dates, proceeds, cost base, gain, and tax
+- **Ticker “if you sell” estimate** — on a stock's page, see estimated CGT for selling N units under FIFO or minimize-CGT parcel picking, including the 1 Jul 2027 cutoff. **Confirm the sale** to write it to the ledger with which parcels were sold or partially sold; the transactions list then shows that status. You still place the trade with your broker.
+- **Stake DRP check** — Stake’s Activity export never lists reinvestment as a buy; this Import sub-page finds missing DRP lots from Activity + Income (+ optional Valuation) files. Analyze first, then confirm to insert. It won’t invent lots for unexplained unit jumps. Files you run through it are listed on that page (separate from regular Import file history).
 - **New-money planner** — compare growth vs income-style portfolios for **future** contributions under a **post–Jul 2027 CGT-style** framing (indexed cost idea, no 50% discount in the main path). Built for “what if I put new capital here?” — not rewriting the past
 
 ### Private by design
@@ -123,6 +124,18 @@ docker compose up --build
 ```
 
 Open **http://localhost:8787**. DB on volume `yields-data` (`YIELDS_DB_PATH=/data/yields.db`).
+
+### hana-server (Podman + Caddy)
+
+crypto-tax already uses **:8787** on that box, so Risu listens on **localhost :8788**. The browser URL is **http://risu.hana-server/** (Caddy on :80).
+
+```bash
+./scripts/deploy-hana.sh
+```
+
+SQLite: `~/risu-data/risu.db` on hana. Daily backups: `~/Documents/Finances/risu-backups`.
+
+Full runbook (Caddy, DNS, UFW, next app): [docs/hana-server.md](docs/hana-server.md).
 
 ### Local deploy scripts
 

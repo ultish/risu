@@ -12,7 +12,13 @@
  * gap — e.g. a corporate action) is a warning, never a guess.
  */
 import { useRef, useState } from "react";
-import { analyzeStakeDrp, type Portfolio, type StakeDrpResult } from "./api";
+import {
+  analyzeStakeDrp,
+  type Portfolio,
+  type StakeDrpProposed,
+  type StakeDrpResult,
+} from "./api";
+import { Panel } from "./App";
 
 type Props = {
   portfolioId: number | "all";
@@ -20,6 +26,8 @@ type Props = {
   onPortfolioChange: (id: number) => void;
   /** Called after a successful commit so the caller can reload holdings/transactions. */
   onCommitted?: () => void;
+  /** Called after analyze or commit so file history can refresh. */
+  onHistoryChange?: () => void;
 };
 
 export default function StakeDrpPanel({
@@ -27,6 +35,7 @@ export default function StakeDrpPanel({
   portfolios,
   onPortfolioChange,
   onCommitted,
+  onHistoryChange,
 }: Props) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [files, setFiles] = useState<File[]>([]);
@@ -73,6 +82,7 @@ export default function StakeDrpPanel({
     try {
       const r = await analyzeStakeDrp({ files, portfolioId, commit: false });
       setResult(r);
+      onHistoryChange?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -82,9 +92,16 @@ export default function StakeDrpPanel({
 
   async function onConfirm() {
     if (portfolioId === "all" || !result) return;
+    const newCount = result.proposed.filter((p) => !p.alreadyInLedger).length;
+    const dupCount = result.proposed.length - newCount;
     const ok = confirm(
-      `Insert ${result.proposed.length} DRP transaction(s) into the ledger? This writes to your database.`,
+      newCount === 0
+        ? "Nothing new to insert — every suggested DRP is already in the ledger."
+        : `Insert ${newCount} new DRP transaction(s) into the ledger?${
+            dupCount ? ` ${dupCount} already in the ledger will be skipped.` : ""
+          }\n\nThis writes to your database.`,
     );
+    if (!ok || newCount === 0) return;
     if (!ok) return;
     setBusy(true);
     setError(null);
@@ -92,6 +109,7 @@ export default function StakeDrpPanel({
       const r = await analyzeStakeDrp({ files, portfolioId, commit: true });
       setResult(r);
       onCommitted?.();
+      onHistoryChange?.();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -100,17 +118,40 @@ export default function StakeDrpPanel({
   }
 
   return (
-    <div className="rounded-lg border border-gray-700 bg-gray-900/50 p-4 text-sm">
-      <div className="mb-2 flex items-center justify-between">
-        <span className="text-xs font-medium uppercase tracking-wide text-gray-500">
-          Stake DRP check
-        </span>
+    <Panel title="Stake DRP check">
+      <div className="mb-4 space-y-3 text-sm text-gray-400">
+        <p>
+          Stake’s <strong className="text-gray-200">Investment Activity</strong>{" "}
+          export never lists dividend reinvestment as a buy — extra units just
+          appear. This page finds those missing <strong className="text-gray-200">DRP lots</strong>{" "}
+          so cost base and tax estimates aren’t short.
+        </p>
+        <p>
+          Drop Stake <strong className="text-gray-200">Investment Activity</strong>,{" "}
+          <strong className="text-gray-200">Investment Income</strong>, and
+          optionally <strong className="text-gray-200">Portfolio Valuation</strong>{" "}
+          workbooks (any years, mixed together). It is{" "}
+          <strong className="text-gray-200">not</strong> a second file import —
+          regular Import file is unchanged.
+        </p>
+        <ol className="list-decimal space-y-1 pl-5">
+          <li>
+            <strong className="text-gray-200">Analyze</strong> — preview only.
+            Suggests a DRP row only when a dividend sits just before the extra
+            units.
+          </li>
+          <li>
+            <strong className="text-gray-200">Confirm &amp; insert</strong> —
+            writes those <code className="text-gray-300">drp</code> lots into
+            the selected portfolio. Re-running skips rows already inserted.
+          </li>
+        </ol>
+        <p>
+          Other unit jumps (share purchase plans, liquidations, splits) show as{" "}
+          <strong className="text-gray-200">warnings</strong> — it will not
+          invent lots. Pick a portfolio first.
+        </p>
       </div>
-      <p className="mb-3 text-xs text-gray-500">
-        Drop your Stake Investment Activity, Investment Income, and (optionally) Portfolio
-        Valuation files — any years, any combination. This is separate from the regular
-        file import; nothing here is written until you confirm.
-      </p>
 
       <label className="mb-3 block text-sm">
         <span className="mb-1 block text-xs text-gray-400">Portfolio</span>
@@ -198,14 +239,17 @@ export default function StakeDrpPanel({
         >
           {busy ? "Working…" : "Analyze"}
         </button>
-        {result && !result.committed && result.proposed.length > 0 && (
+        {result &&
+          !result.committed &&
+          result.proposed.some((p) => !p.alreadyInLedger) && (
           <button
             type="button"
             disabled={busy}
             onClick={() => void onConfirm()}
             className="rounded-lg bg-emerald-500 px-3 py-1.5 text-xs font-medium text-gray-950 hover:bg-emerald-400 disabled:opacity-50"
           >
-            Confirm & insert {result.proposed.length}
+            Confirm & insert{" "}
+            {result.proposed.filter((p) => !p.alreadyInLedger).length}
           </button>
         )}
       </div>
@@ -223,37 +267,35 @@ export default function StakeDrpPanel({
           {result.committed ? (
             <p className="text-xs text-emerald-400">
               Inserted {result.inserted} transaction(s)
-              {result.skippedExisting ? ` (${result.skippedExisting} already existed, skipped)` : ""}.
+              {result.skippedExisting
+                ? ` (${result.skippedExisting} already in the ledger, skipped)`
+                : ""}
+              .
             </p>
           ) : (
             <p className="text-xs text-gray-400">
-              {result.proposed.length} DRP event(s) detected, {result.warnings.length} unexplained
-              gap(s).
+              {result.proposed.filter((p) => !p.alreadyInLedger).length} new DRP
+              event(s)
+              {result.proposed.some((p) => p.alreadyInLedger)
+                ? `, ${result.proposed.filter((p) => p.alreadyInLedger).length} already in the ledger`
+                : ""}
+              , {result.warnings.length} unexplained gap(s).
             </p>
           )}
 
-          {result.proposed.length > 0 && (
-            <table className="mt-2 w-full text-left text-xs">
-              <thead className="text-gray-500">
-                <tr>
-                  <th className="pb-1 pr-4">Date</th>
-                  <th className="pb-1 pr-4">Ticker</th>
-                  <th className="pb-1 pr-4">Units</th>
-                  <th className="pb-1">Funded by</th>
-                </tr>
-              </thead>
-              <tbody>
-                {result.proposed.map((p) => (
-                  <tr key={p.externalId} className="border-t border-gray-800">
-                    <td className="py-1 pr-4 text-gray-300">{p.date}</td>
-                    <td className="py-1 pr-4 font-medium text-gray-200">{p.ticker}</td>
-                    <td className="py-1 pr-4 text-gray-300">{p.quantity}</td>
-                    <td className="py-1 text-gray-400">{p.fundedBy}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+          <DrpTable
+            title={result.committed ? "Inserted" : "New — will insert"}
+            rows={result.proposed.filter((p) => !p.alreadyInLedger)}
+          />
+          <DrpTable
+            title={
+              result.committed
+                ? "Already in the ledger — skipped"
+                : "Already in the ledger — will skip"
+            }
+            rows={result.proposed.filter((p) => p.alreadyInLedger)}
+            duplicate
+          />
 
           {result.warnings.length > 0 && (
             <ul className="mt-3 space-y-1">
@@ -266,6 +308,57 @@ export default function StakeDrpPanel({
           )}
         </div>
       )}
+    </Panel>
+  );
+}
+
+function DrpTable({
+  title,
+  rows,
+  duplicate = false,
+}: {
+  title: string;
+  rows: StakeDrpProposed[];
+  duplicate?: boolean;
+}) {
+  if (rows.length === 0) return null;
+  return (
+    <div className="mt-3">
+      <p
+        className={`mb-1 text-xs font-medium ${
+          duplicate ? "text-amber-300/90" : "text-gray-400"
+        }`}
+      >
+        {title} ({rows.length})
+      </p>
+      <table className="w-full text-left text-xs">
+        <thead className="text-gray-500">
+          <tr>
+            <th className="pb-1 pr-4">Date</th>
+            <th className="pb-1 pr-4">Ticker</th>
+            <th className="pb-1 pr-4">Units</th>
+            <th className="pb-1">{duplicate ? "Why skipped" : "Funded by"}</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((p) => (
+            <tr key={p.externalId ?? `${p.date}-${p.ticker}-${p.quantity}`}>
+              <td className="border-t border-gray-800 py-1 pr-4 text-gray-300">
+                {p.date}
+              </td>
+              <td className="border-t border-gray-800 py-1 pr-4 font-medium text-gray-200">
+                {p.ticker}
+              </td>
+              <td className="border-t border-gray-800 py-1 pr-4 text-gray-300">
+                {p.quantity}
+              </td>
+              <td className="border-t border-gray-800 py-1 text-gray-400">
+                {duplicate ? (p.alreadyHow ?? "already in ledger") : p.fundedBy}
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
     </div>
   );
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { computeLots } from "./lots.js";
+import { computeLots, isPlatformReportedFifoSell } from "./lots.js";
+import { orderFnForMatching } from "./tax/lotMatching.js";
 import type { ParsedTransaction } from "./types.js";
 
 function tx(
@@ -202,5 +203,254 @@ describe("computeLots FIFO matching", () => {
     expect(disposals).toHaveLength(1);
     expect(disposals[0].costBaseAud).toBeCloseTo(400);
     expect(disposals[0].proceedsAud).toBeCloseTo(500);
+  });
+});
+
+describe("computeLots recorded specific identification", () => {
+  it("copies sourceTxId from the buy onto the lot and disposal", () => {
+    const { openLots, disposals } = computeLots([
+      tx({
+        id: 1,
+        date: "2020-01-01",
+        ticker: "VAS",
+        type: "buy",
+        quantity: 10,
+        amount: 1000,
+      }),
+      tx({
+        id: 2,
+        date: "2021-01-01",
+        ticker: "VAS",
+        type: "buy",
+        quantity: 10,
+        amount: 1800,
+      }),
+      tx({
+        id: 3,
+        date: "2024-01-01",
+        ticker: "VAS",
+        type: "sell",
+        quantity: 5,
+        amount: 1000,
+      }),
+    ]);
+
+    expect(disposals[0].acquireTxId).toBe(1); // FIFO: oldest buy
+    expect(disposals[0].sellTxId).toBe(3);
+    expect(openLots.find((l) => l.sourceTxId === 1)?.quantity).toBeCloseTo(5);
+    expect(openLots.find((l) => l.sourceTxId === 2)?.quantity).toBeCloseTo(10);
+  });
+
+  it("consumes the recorded parcel instead of FIFO when takes are stored", () => {
+    const { openLots, disposals } = computeLots(
+      [
+        tx({
+          id: 1,
+          date: "2020-01-01",
+          ticker: "VAS",
+          type: "buy",
+          quantity: 10,
+          amount: 1000,
+        }),
+        tx({
+          id: 2,
+          date: "2021-01-01",
+          ticker: "VAS",
+          type: "buy",
+          quantity: 10,
+          amount: 1800,
+        }),
+        tx({
+          id: 3,
+          date: "2024-01-01",
+          ticker: "VAS",
+          type: "sell",
+          quantity: 5,
+          amount: 1000,
+        }),
+      ],
+      {},
+      {
+        recordedTakes: [
+          { sellTxId: 3, acquireTxId: 2, quantity: 5 },
+        ],
+      },
+    );
+
+    expect(disposals).toHaveLength(1);
+    expect(disposals[0].acquireTxId).toBe(2);
+    expect(disposals[0].costBaseAud).toBeCloseTo(900);
+    expect(openLots.find((l) => l.sourceTxId === 1)?.quantity).toBeCloseTo(10);
+    expect(openLots.find((l) => l.sourceTxId === 2)?.quantity).toBeCloseTo(5);
+  });
+
+  it("can split a recorded sell across two parcels", () => {
+    const { disposals } = computeLots(
+      [
+        tx({
+          id: 1,
+          date: "2020-01-01",
+          ticker: "VAS",
+          type: "buy",
+          quantity: 10,
+          amount: 1000,
+        }),
+        tx({
+          id: 2,
+          date: "2021-01-01",
+          ticker: "VAS",
+          type: "buy",
+          quantity: 10,
+          amount: 1800,
+        }),
+        tx({
+          id: 3,
+          date: "2024-01-01",
+          ticker: "VAS",
+          type: "sell",
+          quantity: 12,
+          amount: 2400,
+        }),
+      ],
+      {},
+      {
+        recordedTakes: [
+          { sellTxId: 3, acquireTxId: 2, quantity: 10 },
+          { sellTxId: 3, acquireTxId: 1, quantity: 2 },
+        ],
+      },
+    );
+
+    expect(disposals).toHaveLength(2);
+    expect(disposals[0].acquireTxId).toBe(2);
+    expect(disposals[0].quantity).toBeCloseTo(10);
+    expect(disposals[1].acquireTxId).toBe(1);
+    expect(disposals[1].quantity).toBeCloseTo(2);
+  });
+});
+
+describe("Betashares Direct statement sells stay FIFO", () => {
+  it("detects platform-reported FIFO sells", () => {
+    expect(
+      isPlatformReportedFifoSell({
+        type: "sell",
+        broker: "betashares_direct",
+        source: "file:betashares_direct.platform_annual",
+      }),
+    ).toBe(true);
+    expect(
+      isPlatformReportedFifoSell({
+        type: "sell",
+        broker: "betashares_direct",
+        source: "confirm-sale",
+      }),
+    ).toBe(false);
+    expect(
+      isPlatformReportedFifoSell({
+        type: "sell",
+        broker: "stake",
+        source: "file:stake.activity",
+      }),
+    ).toBe(false);
+    expect(
+      isPlatformReportedFifoSell(
+        {
+          type: "sell",
+          broker: "stake",
+          source: "file:stake.activity",
+        },
+        ["stake"],
+      ),
+    ).toBe(true);
+    expect(
+      isPlatformReportedFifoSell(
+        {
+          type: "sell",
+          broker: "betashares_direct",
+          source: "file:betashares_direct.platform_annual",
+        },
+        [],
+      ),
+    ).toBe(false);
+  });
+
+  it("consumes the oldest lot for a Betashares statement sell even when min_cgt is requested", () => {
+    const { disposals } = computeLots(
+      [
+        tx({
+          id: 1,
+          date: "2020-01-01",
+          ticker: "BGBL",
+          type: "buy",
+          quantity: 10,
+          amount: 1000,
+        }),
+        tx({
+          id: 2,
+          date: "2021-01-01",
+          ticker: "BGBL",
+          type: "buy",
+          quantity: 10,
+          amount: 1800,
+        }),
+        tx({
+          id: 3,
+          date: "2024-01-01",
+          ticker: "BGBL",
+          type: "sell",
+          quantity: 5,
+          amount: 1000,
+          broker: "betashares_direct",
+          source: "file:betashares_direct.platform_annual",
+        }),
+      ],
+      {},
+      {
+        orderLotsForSale: orderFnForMatching("min_cgt", { regime: "auto_by_date" }),
+        customMatching: "min_cgt",
+      },
+    );
+    expect(disposals[0].acquireTxId).toBe(1);
+    expect(disposals[0].parcelMatch).toBe("fifo");
+  });
+
+  it("still applies min_cgt to a Betashares sell you recorded yourself", () => {
+    const { disposals } = computeLots(
+      [
+        tx({
+          id: 1,
+          date: "2020-01-01",
+          ticker: "BGBL",
+          type: "buy",
+          quantity: 10,
+          amount: 1000,
+        }),
+        tx({
+          id: 2,
+          date: "2021-01-01",
+          ticker: "BGBL",
+          type: "buy",
+          quantity: 10,
+          amount: 1800,
+        }),
+        tx({
+          id: 3,
+          date: "2024-01-01",
+          ticker: "BGBL",
+          type: "sell",
+          quantity: 5,
+          amount: 1000,
+          broker: "betashares_direct",
+          source: "confirm-sale",
+        }),
+      ],
+      {},
+      {
+        orderLotsForSale: orderFnForMatching("min_cgt", { regime: "auto_by_date" }),
+        customMatching: "min_cgt",
+      },
+    );
+    expect(disposals[0].acquireTxId).toBe(2);
+    expect(disposals[0].parcelMatch).toBe("min_cgt");
   });
 });

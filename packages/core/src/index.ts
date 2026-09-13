@@ -18,6 +18,7 @@ export * from "./tax/types.js";
 export * from "./tax/cgt.js";
 export * from "./tax/incomeTax.js";
 export * from "./tax/realisedCgt.js";
+export * from "./tax/lotMatching.js";
 export * from "./tax/fyEstimate.js";
 
 // Phase 4 — planner engine

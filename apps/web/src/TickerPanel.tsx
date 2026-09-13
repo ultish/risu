@@ -3,6 +3,7 @@ import {
   type Filters,
   type Holding,
   type InstrumentAssumptionsDto,
+  type Portfolio,
   type TxRow,
   deleteTransactions,
   fetchInstrumentAssumptions,
@@ -13,6 +14,7 @@ import {
   ExchangeBadge,
   Panel,
   SortTh,
+  ParcelBadge,
   TypeBadge,
   money,
   qty,
@@ -20,12 +22,14 @@ import {
   type TxSortKey,
 } from "./App";
 import PerformanceChart from "./PerformanceChart";
+import { TickerSellTaxPanel } from "./TickerSellTaxPanel";
 
 type Props = {
   ticker: string;
   exchange: string;
   holding: Holding | undefined;
   filters: Filters;
+  portfolios: Portfolio[];
   reloadToken?: number | string;
   onBack: () => void;
   onViewLedger: () => void;
@@ -40,6 +44,7 @@ export function TickerPanel({
   exchange,
   holding,
   filters,
+  portfolios,
   reloadToken,
   onBack,
   onViewLedger,
@@ -222,6 +227,22 @@ export function TickerPanel({
         )}
       </Panel>
 
+      <TickerSellTaxPanel
+        ticker={ticker}
+        exchange={exchange}
+        holding={holding}
+        filters={filters}
+        portfolios={portfolios}
+        reloadToken={reloadToken}
+        onConfirmed={() => {
+          setSelectedTxIds(new Set());
+          void fetchTransactions(filters)
+            .then(setTxs)
+            .catch(() => undefined);
+          onChanged?.();
+        }}
+      />
+
       {hasAbout && (
         <Panel title="About">
           <div className="space-y-1 text-sm text-gray-300">
@@ -307,6 +328,7 @@ export function TickerPanel({
                       dir={txSort.dir}
                       onClick={() => toggleTxSort("type")}
                     />
+                    <th className="px-2 py-2 font-medium">Parcel</th>
                     <SortTh
                       label="Broker"
                       active={txSort.key === "broker"}
@@ -355,6 +377,9 @@ export function TickerPanel({
                       </td>
                       <td className="px-2 py-1.5">
                         <TypeBadge type={t.type} />
+                      </td>
+                      <td className="px-2 py-1.5">
+                        <ParcelBadge tx={t} />
                       </td>
                       <td className="px-2 py-1.5 text-xs text-gray-400">
                         {t.broker || t.custody || "—"}

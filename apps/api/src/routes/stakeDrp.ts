@@ -57,13 +57,36 @@ export function registerStakeDrpRoutes(
     );
 
     const analysis = analyzeStakeDrp(files);
+    const proposed = annotateExistingDrp(db, portfolioId, analysis.proposed);
+
+    const unrecognized = new Set(analysis.unrecognizedFiles);
+    const recognized = files.filter((f) => !unrecognized.has(f.filename));
+    const insertBatch = db.prepare(
+      `INSERT INTO import_batches (portfolio_id, account_id, filename, broker, source, row_count, imported_count, skipped_count, warnings_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
 
     if (!commit) {
+      for (const f of recognized) {
+        insertBatch.run(
+          portfolioId,
+          portfolioId,
+          f.filename,
+          "stake",
+          "stake-drp-detect",
+          proposed.length,
+          0,
+          proposed.filter((p) => p.alreadyInLedger).length,
+          JSON.stringify(analysis.warnings),
+        );
+      }
       return c.json({
-        proposed: analysis.proposed,
+        proposed,
         warnings: analysis.warnings,
         unrecognizedFiles: analysis.unrecognizedFiles,
         committed: false,
+        alreadyInLedger: proposed.filter((p) => p.alreadyInLedger).length,
+        newCount: proposed.filter((p) => !p.alreadyInLedger).length,
       });
     }
 
@@ -99,13 +122,82 @@ export function registerStakeDrpRoutes(
     });
     insertMany(analysis.proposed);
 
+    const skippedExisting = proposed.filter((p) => p.alreadyInLedger).length;
+    for (const f of recognized) {
+      insertBatch.run(
+        portfolioId,
+        portfolioId,
+        f.filename,
+        "stake",
+        "stake-drp-detect",
+        proposed.length,
+        inserted,
+        skippedExisting,
+        JSON.stringify(analysis.warnings),
+      );
+    }
+
     return c.json({
-      proposed: analysis.proposed,
+      proposed,
       warnings: analysis.warnings,
       unrecognizedFiles: analysis.unrecognizedFiles,
       committed: true,
       inserted,
-      skippedExisting: analysis.proposed.length - inserted,
+      skippedExisting,
+      alreadyInLedger: skippedExisting,
+      newCount: proposed.filter((p) => !p.alreadyInLedger).length,
     });
   });
+}
+
+type ProposedDrp = ReturnType<typeof analyzeStakeDrp>["proposed"][number];
+
+function annotateExistingDrp(
+  db: Database.Database,
+  portfolioId: number,
+  proposed: ProposedDrp[],
+): Array<ProposedDrp & { alreadyInLedger: boolean; alreadyHow: string | null }> {
+  const byExternal = new Set(
+    (
+      db
+        .prepare(
+          `SELECT external_id AS id FROM transactions
+           WHERE portfolio_id = ? AND external_id IS NOT NULL`,
+        )
+        .all(portfolioId) as Array<{ id: string }>
+    ).map((r) => r.id),
+  );
+  const byLot = new Set(
+    (
+      db
+        .prepare(
+          `SELECT date, ticker, exchange, quantity FROM transactions
+           WHERE portfolio_id = ? AND type = 'drp'`,
+        )
+        .all(portfolioId) as Array<{
+        date: string;
+        ticker: string;
+        exchange: string;
+        quantity: number;
+      }>
+    ).map((r) => lotKey(r.date, r.ticker, r.exchange, r.quantity)),
+  );
+
+  return proposed.map((p) => {
+    if (p.externalId && byExternal.has(p.externalId)) {
+      return { ...p, alreadyInLedger: true, alreadyHow: "same Stake DRP id" };
+    }
+    if (byLot.has(lotKey(p.date, p.ticker, p.exchange, p.quantity))) {
+      return {
+        ...p,
+        alreadyInLedger: true,
+        alreadyHow: "same date / ticker / units already in the ledger as DRP",
+      };
+    }
+    return { ...p, alreadyInLedger: false, alreadyHow: null };
+  });
+}
+
+function lotKey(date: string, ticker: string, exchange: string, quantity: number) {
+  return `${date}|${ticker.toUpperCase()}|${exchange.toUpperCase()}|${quantity}`;
 }
