@@ -467,7 +467,7 @@ export function takeLotsForSale(
  * effort) — same precedence `computeHoldings` uses, never a blended
  * today's-rate conversion of the whole ledger.
  */
-function nativeToAud(
+export function nativeToAud(
   amountNative: number,
   txCurrency: string,
   canonicalCurrency: string,

@@ -4,6 +4,7 @@ import { serveStatic } from "@hono/node-server/serve-static";
 import {
   computeHoldings,
   computeLots,
+  lotsAsOf,
   defaultAllocationTemplates,
   defaultCurrencyForExchange,
   fetchFxHistory,
@@ -46,7 +47,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { getDbPath, openDb } from "./db.js";
 import { registerExportRoutes } from "./routes/export.js";
-import { registerPerformanceRoutes } from "./routes/performance.js";
+import {
+  loadFxHistory,
+  loadFxRates,
+  loadPriceSeries,
+  registerPerformanceRoutes,
+} from "./routes/performance.js";
 import { registerGainsRoutes } from "./routes/gains.js";
 import { registerReconcileRoutes } from "./routes/reconcile.js";
 import { registerStakeDrpRoutes } from "./routes/stakeDrp.js";
@@ -975,6 +981,38 @@ app.post("/api/transactions/delete", async (c) => {
   const deleted = run(ids);
   purgeOrphanedPriceCache(affected);
   return c.json({ ok: true, deleted });
+});
+
+/**
+ * GET /api/lots?portfolioId=&asOf=yyyy-mm-dd&since=yyyy-mm-dd
+ * Open parcels as of `asOf` (AUD cost, market value, value at the 1 Jul 2027
+ * cutover) plus buys and matched sells within [since, asOf]. Read-only;
+ * used by tanuki's plan tracker. Sells match parcels the same way the Tax
+ * tab does (confirmed takes, platform FIFO, else FIFO).
+ */
+app.get("/api/lots", (c) => {
+  const portfolioId = c.req.query("portfolioId") || c.req.query("accountId");
+  const asOf = c.req.query("asOf") || new Date().toISOString().slice(0, 10);
+  const since = c.req.query("since") || undefined;
+  const iso = /^\d{4}-\d{2}-\d{2}$/;
+  if (!iso.test(asOf) || (since != null && !iso.test(since))) {
+    return c.json({ error: "asOf and since must be yyyy-mm-dd" }, 400);
+  }
+  const txs = loadTransactions({
+    portfolioId: portfolioId ? Number(portfolioId) : undefined,
+  });
+  return c.json(
+    lotsAsOf(txs, {
+      asOf,
+      since,
+      priceSeries: loadPriceSeries(db),
+      fx: { rates: loadFxRates(db), series: loadFxHistory(db) },
+      lotOptions: {
+        recordedTakes: loadParcelTakes(db),
+        platformFifoBrokers: loadPlatformFifoBrokers(),
+      },
+    }),
+  );
 });
 
 app.get("/api/holdings", (c) => {

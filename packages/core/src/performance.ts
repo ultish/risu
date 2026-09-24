@@ -121,7 +121,7 @@ export function buildPerformanceSeries(
 }
 
 /** Last close on or before `date` for each open instrument. */
-function pricesAsOf(
+export function pricesAsOf(
   txs: ParsedTransaction[],
   date: string,
   priceIndex: Map<string, Array<{ date: string; close: number }>>,
@@ -152,7 +152,7 @@ function pricesAsOf(
   return prices;
 }
 
-function fxAsOf(
+export function fxAsOf(
   date: string,
   flat: Record<string, number | null | undefined>,
   seriesIndex: Map<string, Array<{ date: string; rate: number }>>,
@@ -168,7 +168,7 @@ function fxAsOf(
   return out;
 }
 
-function buildLastPriceIndex(
+export function buildLastPriceIndex(
   series: PriceSeriesMap,
 ): Map<string, Array<{ date: string; close: number }>> {
   const map = new Map<string, Array<{ date: string; close: number }>>();
@@ -181,7 +181,7 @@ function buildLastPriceIndex(
   return map;
 }
 
-function buildLastFxIndex(
+export function buildLastFxIndex(
   series: Record<string, Array<{ date: string; rate: number }>>,
 ): Map<string, Array<{ date: string; rate: number }>> {
   const map = new Map<string, Array<{ date: string; rate: number }>>();

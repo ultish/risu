@@ -2,6 +2,7 @@ export * from "./types.js";
 export * from "./market.js";
 export * from "./holdings.js";
 export * from "./lots.js";
+export * from "./lotsAsOf.js";
 export * from "./splits.js";
 export * from "./performance.js";
 export * from "./gains.js";
