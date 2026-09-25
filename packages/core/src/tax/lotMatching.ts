@@ -3,9 +3,10 @@
  * (specific identification — consume the lots with the lowest estimated
  * taxable gain per unit first).
  *
- * Scoring uses the same 1 Jul 2027 cutover as `estimateRealisedCgt`:
- * pre-cutover long-term gains are halved; post-cutover gains use
- * CPI-indexed cost and no discount. Losses score as their full (negative)
+ * Scoring uses the same 1 Jul 2027 rules as `estimateRealisedCgt`:
+ * pre-cutover long-term gains are halved; a sale on/after 1 Jul 2027 is
+ * split at the parcel's 30 June 2027 value (act2027.ts) — the part before
+ * halved if held 12 months, the part after indexed from 1 July 2027. Losses score as their full (negative)
  * raw gain, so they are always preferred when the goal is to minimise tax.
  *
  * Isolation-per-unit greedy is used because lots can be sold fractionally
@@ -20,17 +21,31 @@ import {
   type RealisedDisposal,
 } from "../lots.js";
 import {
+  cutoverValueFor,
+  splitAct2027,
+  type Act2027Parts,
+  type CutoverValues,
+} from "./act2027.js";
+import {
   daysBetweenIso,
   estimateRealisedCgt,
   indexCostBaseAud,
   resolveCgtRegime,
 } from "./cgt.js";
 import { estimateRealisedCgtForLedger } from "./realisedCgt.js";
-import type { CgtRegime, LotMatchingMethod, TaxProfile } from "./types.js";
+import {
+  CGT_REGIME_CUTOVER_ISO,
+  type AppliedCgtRegime,
+  type CgtRegime,
+  type LotMatchingMethod,
+  type TaxProfile,
+} from "./types.js";
 
 export type MinCgtOrderOpts = {
   regime: CgtRegime;
   annualInflationRate?: number;
+  /** 30 June 2027 values, for sales the Act splits. Estimated when absent. */
+  cutover?: CutoverValues;
 };
 
 /**
@@ -45,6 +60,23 @@ export function taxableGainPerUnit(
 ): number {
   if (!(lot.quantity > 0)) return 0;
   const applied = resolveCgtRegime(opts.regime, disposedDate);
+  if (applied === "act_2027") {
+    const parts = splitAct2027({
+      proceedsAud: proceedsPerUnitAud,
+      costBaseAud: lot.costBaseAud / lot.quantity,
+      acquiredDate: lot.acquiredDate,
+      disposedDate,
+      annualInflationRate: opts.annualInflationRate,
+      cutover:
+        lot.acquiredDate < CGT_REGIME_CUTOVER_ISO
+          ? cutoverValueFor(opts.cutover, lot.exchange, lot.ticker, 1, disposedDate)
+          : null,
+    });
+    // Taxable-gain proxy: exact when MTR+Medicare ≥ 30%; the minimum tax
+    // only makes post-2027 gains weigh a little more below that.
+    const pre = parts.preGain > 0 && parts.heldTwelveMonths ? parts.preGain * 0.5 : parts.preGain;
+    return pre + parts.postGain;
+  }
   let costPerUnit = lot.costBaseAud / lot.quantity;
   if (applied === "indexation_min30") {
     const indexed = indexCostBaseAud(
@@ -97,7 +129,8 @@ export function orderFnForMatching(
 export type HypotheticalSaleParcel = RealisedDisposal & {
   capitalGain: number;
   longTerm: boolean;
-  appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+  appliedRegime: AppliedCgtRegime;
+  act?: Act2027Parts;
 };
 
 export type HypotheticalSaleSummary = {
@@ -108,7 +141,7 @@ export type HypotheticalSaleSummary = {
   capitalGain: number;
   taxableGain: number;
   tax: number;
-  appliedRegime: Exclude<CgtRegime, "auto_by_date"> | null;
+  appliedRegime: AppliedCgtRegime | null;
 };
 
 export type HypotheticalSaleEstimate = HypotheticalSaleSummary & {
@@ -133,6 +166,7 @@ export function estimateHypotheticalSale(input: {
   regime: CgtRegime;
   profile: TaxProfile;
   annualInflationRate?: number;
+  cutover?: CutoverValues;
 }): HypotheticalSaleEstimate {
   const fifo = runSale({ ...input, matching: "fifo" });
   const minCgt = runSale({ ...input, matching: "min_cgt" });
@@ -143,7 +177,7 @@ export function estimateHypotheticalSale(input: {
     input.matching === "min_cgt"
       ? "Parcels picked to minimise estimated CGT (specific identification): losses and smallest post-discount/indexation gains first."
       : "Parcels picked FIFO (oldest lot sold first).",
-    "1 Jul 2027 cutover: disposals before that date use the 50% CGT discount when held ≥ 365 days; from that date, cost is CPI-indexed and there is no discount (rate floored at 30%).",
+    "1 Jul 2027 cutover: disposals before that date use the 50% CGT discount when held ≥ 365 days. From that date, a parcel held across it is split at its 30 June 2027 value — the gain before keeps the 50% discount if held 12 months by the sale; the gain after is CPI-indexed from 1 July 2027 with a 30% minimum.",
   ];
   if (selected.unmatchedQuantity > 0) {
     notes.push(
@@ -171,12 +205,14 @@ function runSale(input: {
   regime: CgtRegime;
   profile: TaxProfile;
   annualInflationRate?: number;
+  cutover?: CutoverValues;
 }): Omit<HypotheticalSaleEstimate, "comparison" | "notes" | "matching"> & {
   matching: LotMatchingMethod;
 } {
   const order = orderFnForMatching(input.matching, {
     regime: input.regime,
     annualInflationRate: input.annualInflationRate,
+    cutover: input.cutover,
   });
   const { disposals, unmatchedQuantity } = takeLotsForSale(
     input.openLots,
@@ -195,12 +231,17 @@ function runSale(input: {
       regime: input.regime,
       profile: input.profile,
       annualInflationRate: input.annualInflationRate,
+      cutover:
+        d.acquiredDate < CGT_REGIME_CUTOVER_ISO
+          ? cutoverValueFor(input.cutover, d.exchange, d.ticker, d.quantity, d.disposedDate)
+          : null,
     });
     return {
       ...d,
       capitalGain: result.capitalGain,
       longTerm: result.longTerm,
       appliedRegime: result.appliedRegime,
+      ...(result.act ? { act: result.act } : {}),
     };
   });
 
@@ -208,6 +249,7 @@ function runSale(input: {
     regime: input.regime,
     profile: input.profile,
     annualInflationRate: input.annualInflationRate,
+    cutover: input.cutover,
   });
   const fy = report.fyTotals[0];
   const quantitySold = roundQty(disposals.reduce((s, d) => s + d.quantity, 0));

@@ -741,8 +741,21 @@ export type RealisedCgtLineDto = {
   /** Raw gain/loss for this disposal — negative = loss. Tax is computed at the FY level (see fyTotals), not per line. */
   capitalGain: number;
   longTerm: boolean;
-  appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+  appliedRegime: AppliedCgtRegime;
+  act?: Act2027PartsDto;
   parcelMatch?: "fifo" | "min_cgt" | "recorded";
+};
+
+/** The treatment one disposal gets; `act_2027` = on/after 1 Jul 2027, split at the 30 June 2027 value. */
+export type AppliedCgtRegime = "discount_50" | "indexation_min30" | "act_2027";
+
+export type Act2027PartsDto = {
+  preGain: number;
+  postGain: number;
+  heldTwelveMonths: boolean;
+  cutoverValueAud: number | null;
+  cutoverSource: "saved" | "prices" | "estimated" | null;
+  postCostBaseAud: number;
 };
 
 export type FyTaxTotalDto = {
@@ -777,7 +790,7 @@ export type FyTaxEstimateDto = {
     lines: RealisedCgtLineDto[];
     fyTotals: Array<{
       financialYear: string;
-      appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+      appliedRegime: AppliedCgtRegime;
       totalGains: number;
       totalLosses: number;
       netCapitalGain: number;
@@ -788,6 +801,8 @@ export type FyTaxEstimateDto = {
       taxableGain: number;
       tax: number;
       disposalCount: number;
+      /** Post-2027 gains left after losses, taxed at no less than 30%. */
+      minimumTaxGain?: number;
     }>;
   };
   dividendTax: {
@@ -828,7 +843,8 @@ export type SellEstimateParcelDto = {
   costBaseAud: number;
   capitalGain: number;
   longTerm: boolean;
-  appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+  appliedRegime: AppliedCgtRegime;
+  act?: Act2027PartsDto;
   acquireTxId?: number;
 };
 
@@ -840,7 +856,7 @@ export type SellEstimateSummaryDto = {
   capitalGain: number;
   taxableGain: number;
   tax: number;
-  appliedRegime: Exclude<CgtRegime, "auto_by_date"> | null;
+  appliedRegime: AppliedCgtRegime | null;
 };
 
 export type SellEstimateDto = SellEstimateSummaryDto & {

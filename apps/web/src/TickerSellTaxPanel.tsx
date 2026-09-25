@@ -16,7 +16,7 @@ import {
   fetchTaxProfiles,
 } from "./api";
 import { Disclaimer } from "./Disclaimer";
-import { Empty, Panel, cgtLineRegimeLabel, money, qty } from "./App";
+import { Empty, Panel, cgtActDetail, cgtLineRegimeLabel, money, qty } from "./App";
 
 const MATCHING: Array<{ id: LotMatchingMethod; label: string }> = [
   { id: "fifo", label: "FIFO" },
@@ -201,8 +201,9 @@ export function TickerSellTaxPanel({
         Direct sell). Auto-rebalance sells imported from a Betashares
         Direct statement stay FIFO on the Tax tab, matching their report.
         The 1 Jul 2027 cutoff is applied by sale date: before it, parcels
-        held ≥ 12 months get the 50% discount; from that date, cost is
-        CPI-indexed and there is no discount.
+        held ≥ 12 months get the 50% discount; from that date, a parcel held
+        across it is split at its 30 June 2027 value — discount on the gain
+        before, CPI indexation and a 30% minimum on the gain after.
       </p>
 
       <div className="mb-4 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
@@ -295,16 +296,19 @@ export function TickerSellTaxPanel({
       >
         {postCutover ? (
           <>
-            Sale is on or after 1 Jul 2027: no 50% CGT discount. Cost base
-            is CPI-indexed and tax is max(MTR+Medicare, 30%) of the indexed
-            gain. Older parcels get more indexation, which can shrink their
-            gain relative to FIFO.
+            Sale is on or after 1 Jul 2027: each parcel bought before then is
+            split at its 30 June 2027 value. The gain up to then keeps the 50%
+            discount if the parcel has been held 12 months by the sale; the
+            gain after is CPI-indexed from 1 July 2027 and taxed at
+            max(MTR+Medicare, 30%). Until 30 June 2027 has a closing price,
+            that value is estimated — save a valuation for that date on the
+            Valuations tab and it&apos;s used instead.
           </>
         ) : (
           <>
             Sale is before 1 Jul 2027: parcels held at least 12 months get
             the 50% CGT discount. Set the sale date to 1 Jul 2027 or later
-            to see the post-cutover (indexed, no discount) estimate.
+            to see how the split at 30 June 2027 works out.
           </>
         )}
       </p>
@@ -416,7 +420,10 @@ export function TickerSellTaxPanel({
                         {p.longTerm ? "Long" : "Short"}
                       </td>
                       <td className="py-1 pr-3 text-gray-400">
-                        {cgtLineRegimeLabel(p.appliedRegime, p.longTerm)}
+                        {cgtLineRegimeLabel(p.appliedRegime, p.longTerm, p.act)}
+                        {cgtActDetail(p.act) && (
+                          <span className="block text-[11px] text-gray-500">{cgtActDetail(p.act)}</span>
+                        )}
                       </td>
                     </tr>
                   ))}

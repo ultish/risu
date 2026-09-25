@@ -27,6 +27,9 @@
  * a FY boundary (1 Jul) — so netting within one FY never has to reconcile
  * two regimes at once.
  *
+ * - `act_2027` (auto, FY2028 on): each disposal is split at its 30 June 2027
+ *   value and the year is netted in the Act's order — see act2027.ts.
+ *
  * - `indexation_min30`: no discount concept. Net gain (after current-year AND
  *   carried-forward losses) × max(MTR+Medicare, 30%).
  * - `discount_50`: losses (current-year, then carried-forward) are applied
@@ -40,20 +43,34 @@
  */
 import { auFinancialYear } from "../income.js";
 import type { RealisedDisposal } from "../lots.js";
-import { estimateRealisedCgt, post2027CgtRateOnGain } from "./cgt.js";
-import { combinedMarginalRate, type CgtRegime, type TaxProfile } from "./types.js";
+import {
+  cutoverValueFor,
+  netAct2027,
+  type Act2027Parts,
+  type CutoverValues,
+} from "./act2027.js";
+import { estimateRealisedCgt, post2027CgtRateOnGain, resolveCgtRegime } from "./cgt.js";
+import {
+  CGT_REGIME_CUTOVER_ISO,
+  combinedMarginalRate,
+  type AppliedCgtRegime,
+  type CgtRegime,
+  type TaxProfile,
+} from "./types.js";
 
 export type RealisedCgtLine = RealisedDisposal & {
   financialYear: string;
   /** Raw gain/loss for this disposal (indexed already, if the regime applies indexation). Negative = loss. */
   capitalGain: number;
   longTerm: boolean;
-  appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+  appliedRegime: AppliedCgtRegime;
+  /** The split at 30 June 2027 (`act_2027` lines only). */
+  act?: Act2027Parts;
 };
 
 export type RealisedCgtFyTotal = {
   financialYear: string;
-  appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+  appliedRegime: AppliedCgtRegime;
   /** Sum of this FY's disposals with a positive raw gain. */
   totalGains: number;
   /** Sum of this FY's disposals with a raw loss (positive number). */
@@ -72,6 +89,8 @@ export type RealisedCgtFyTotal = {
   taxableGain: number;
   tax: number;
   disposalCount: number;
+  /** Post-2027 gains left after losses, taxed at no less than 30% (`act_2027` years; else 0). */
+  minimumTaxGain: number;
 };
 
 export type RealisedCgtReport = {
@@ -85,9 +104,14 @@ export function estimateRealisedCgtForLedger(
     regime: CgtRegime;
     profile: TaxProfile;
     annualInflationRate?: number;
+    /** 30 June 2027 values, for disposals the Act splits. Estimated when absent. */
+    cutover?: CutoverValues;
   },
 ): RealisedCgtReport {
   const lines: RealisedCgtLine[] = disposals.map((d) => {
+    const straddles =
+      resolveCgtRegime(opts.regime, d.disposedDate) === "act_2027" &&
+      d.acquiredDate < CGT_REGIME_CUTOVER_ISO;
     const result = estimateRealisedCgt({
       proceedsAud: d.proceedsAud,
       costBaseAud: d.costBaseAud,
@@ -96,6 +120,9 @@ export function estimateRealisedCgtForLedger(
       regime: opts.regime,
       profile: opts.profile,
       annualInflationRate: opts.annualInflationRate,
+      cutover: straddles
+        ? cutoverValueFor(opts.cutover, d.exchange, d.ticker, d.quantity, d.disposedDate)
+        : null,
     });
     return {
       ...d,
@@ -103,6 +130,7 @@ export function estimateRealisedCgtForLedger(
       capitalGain: result.capitalGain,
       longTerm: result.longTerm,
       appliedRegime: result.appliedRegime,
+      ...(result.act ? { act: result.act } : {}),
     };
   });
 
@@ -139,6 +167,29 @@ function netFyGains(
 ): RealisedCgtFyTotal {
   // Uniform per FY — see module doc comment.
   const appliedRegime = fyLines[0]!.appliedRegime;
+
+  if (appliedRegime === "act_2027") {
+    const net = netAct2027(
+      fyLines.map((l) => l.act!),
+      carryIn,
+      profile,
+    );
+    return {
+      financialYear,
+      appliedRegime,
+      totalGains: net.totalGains,
+      totalLosses: net.totalLosses,
+      netCapitalGain: round2(Math.max(0, net.totalGains - net.totalLosses)),
+      netCapitalLoss: net.netCapitalLoss,
+      lossCarriedIn: round2(carryIn),
+      priorLossApplied: net.priorLossApplied,
+      lossCarriedOut: net.lossCarriedOut,
+      taxableGain: net.taxableGain,
+      tax: net.tax,
+      disposalCount: fyLines.length,
+      minimumTaxGain: net.minimumTaxGain,
+    };
+  }
 
   const gains = fyLines.filter((l) => l.capitalGain > 0);
   const losses = fyLines.filter((l) => l.capitalGain < 0);
@@ -193,6 +244,7 @@ function netFyGains(
     taxableGain: round2(taxableGain),
     tax: round2(tax),
     disposalCount: fyLines.length,
+    minimumTaxGain: 0,
   };
 }
 

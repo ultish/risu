@@ -20,16 +20,20 @@
  * - Long-term: 50% of gain × (MTR + Medicare)
  * - Short-term: full gain × (MTR + Medicare)
  *
- * ### `auto_by_date`
+ * ### `auto_by_date` — as legislated
  * - disposal &lt; 2027-07-01 → discount_50
- * - disposal ≥ 2027-07-01 → indexation_min30
+ * - disposal ≥ 2027-07-01 → act_2027: split at the 30 June 2027 value
+ *   (see act2027.ts). `indexation_min30` stays as a "whole gain, indexed
+ *   from purchase" reference.
  *
  * Capital losses: tax = 0 (no carry-forward in this sketch).
  */
 
+import { netAct2027, splitAct2027, type Act2027Parts } from "./act2027.js";
 import {
   CGT_REGIME_CUTOVER_ISO,
   combinedMarginalRate,
+  type AppliedCgtRegime,
   type CgtRegime,
   type TaxProfile,
 } from "./types.js";
@@ -65,6 +69,11 @@ export type RealisedCgtInput = {
    * monthly indexation). Do not inflate again.
    */
   costBaseAlreadyIndexed?: boolean;
+  /**
+   * Value of the units sold just before 1 July 2027 (`act_2027` only). When
+   * absent, it's estimated by time between cost and proceeds.
+   */
+  cutover?: { valueAud: number; source: "saved" | "prices" } | null;
 };
 
 export type RealisedCgtResult = {
@@ -75,7 +84,9 @@ export type RealisedCgtResult = {
   daysHeld: number;
   longTerm: boolean;
   /** Resolved regime after auto_by_date */
-  appliedRegime: Exclude<CgtRegime, "auto_by_date">;
+  appliedRegime: AppliedCgtRegime;
+  /** The split at 30 June 2027 (`act_2027` only). */
+  act?: Act2027Parts;
   /** Amount of gain included in taxable income */
   taxableGain: number;
   /** Effective tax rate applied to capitalGain (0–1) */
@@ -88,11 +99,9 @@ export type RealisedCgtResult = {
 export function resolveCgtRegime(
   regime: CgtRegime,
   disposedDate: string,
-): Exclude<CgtRegime, "auto_by_date"> {
+): AppliedCgtRegime {
   if (regime === "auto_by_date") {
-    return disposedDate >= CGT_REGIME_CUTOVER_ISO
-      ? "indexation_min30"
-      : "discount_50";
+    return disposedDate >= CGT_REGIME_CUTOVER_ISO ? "act_2027" : "discount_50";
   }
   return regime;
 }
@@ -144,6 +153,37 @@ export function estimateRealisedCgt(input: RealisedCgtInput): RealisedCgtResult 
     "Average cost method (not FIFO / parcel matching).",
     "Model estimate only — not ATO calculation.",
   ];
+
+  if (appliedRegime === "act_2027") {
+    const act = splitAct2027({
+      proceedsAud: input.proceedsAud,
+      costBaseAud: input.costBaseAud,
+      acquiredDate: input.acquiredDate,
+      disposedDate: input.disposedDate,
+      annualInflationRate: input.annualInflationRate,
+      cutover: input.cutover,
+    });
+    // On its own — no other disposals or carried losses to net against.
+    const net = netAct2027([act], 0, input.profile);
+    const capitalGain = round2(act.preGain + act.postGain);
+    return {
+      capitalGain,
+      costBaseUsedAud: round2(input.costBaseAud),
+      daysHeld,
+      longTerm,
+      appliedRegime,
+      act,
+      taxableGain: net.taxableGain,
+      effectiveRateOnGain: capitalGain > 0 ? net.tax / capitalGain : 0,
+      tax: net.tax,
+      notes: [
+        ...notes,
+        act.cutoverValueAud == null
+          ? "Bought after 1 Jul 2027: cost indexed from purchase (once held 12 months), taxed at max(MTR+Medicare, 30%)."
+          : `Split at the 30 Jun 2027 value (${act.cutoverSource}): gain before keeps the old rules${act.heldTwelveMonths ? " with the 50% discount" : " (held under 12 months, no discount)"}; gain after is indexed from 1 Jul 2027 and taxed at max(MTR+Medicare, 30%).`,
+      ],
+    };
+  }
 
   let costBaseUsed = input.costBaseAud;
 

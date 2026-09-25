@@ -17,7 +17,9 @@ import {
 import { inferSplitEvents } from "./splits.js";
 import type { ParsedTransaction } from "./types.js";
 
-/** Parcels bought before this and still held later carry their value on this date for the hybrid CGT regime. */
+import { CUTOVER_VALUATION_DATE } from "./tax/types.js";
+
+/** Parcels bought before this and still held later carry their value just before it. */
 export const CGT_REGIME_CUTOVER = "2027-07-01";
 
 export type LotAsOf = {
@@ -103,7 +105,8 @@ export function lotsAsOf(
 
   const now = ledgerAt(opts.asOf);
   const atCutover =
-    opts.asOf >= CGT_REGIME_CUTOVER ? ledgerAt(CGT_REGIME_CUTOVER) : null;
+    // "Market value just before 1 July 2027" — the 30 June 2027 close.
+    opts.asOf >= CGT_REGIME_CUTOVER ? ledgerAt(CUTOVER_VALUATION_DATE) : null;
   const cutoverLotByTx = new Map(
     (atCutover?.openLots ?? [])
       .filter((l) => l.sourceTxId != null)

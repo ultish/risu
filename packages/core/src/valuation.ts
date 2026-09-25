@@ -12,6 +12,8 @@ import {
   type PriceSeriesMap,
 } from "./performance.js";
 import { inferSplitEvents } from "./splits.js";
+import type { CutoverValues } from "./tax/act2027.js";
+import { CUTOVER_VALUATION_DATE } from "./tax/types.js";
 import type { ParsedTransaction } from "./types.js";
 
 /** A close more than this many days before the valuation date is flagged as stale. */
@@ -372,4 +374,48 @@ export function valuationReportToCsv(r: ValuationReport): string {
     }
   }
   return `${rows.join("\n")}\n`;
+}
+
+/**
+ * Each instrument's value per unit just before 1 July 2027, for splitting
+ * disposals under the Act (tax/act2027.ts). Built from cached prices — only
+ * a current close counts: a stale price, a missing one or today's FX for
+ * that date is left out, so a sale priced before 30 June 2027 has happened
+ * falls back to an estimate. A saved valuation dated 30 June 2027 wins, so
+ * the Tax tab agrees with the record you kept.
+ */
+export function cutoverValuesFrom(
+  transactions: ParsedTransaction[],
+  opts: {
+    priceSeries?: PriceSeriesMap;
+    fx?: FxInput;
+    saved?: ValuationReport | null;
+  },
+): CutoverValues {
+  const unitValues: CutoverValues["unitValues"] = {};
+  const take = (v: Valuation, source: "saved" | "prices", strict: boolean) => {
+    for (const b of v.brokers) {
+      for (const l of b.lines) {
+        if (l.marketValueAud == null || !(l.quantity > 0)) continue;
+        if (strict && l.flags.some((f) => f !== "untracked_units")) continue;
+        unitValues[holdingPriceKey(l.exchange, l.ticker)] = {
+          unitValueAud: l.marketValueAud / l.quantity,
+          source,
+        };
+      }
+    }
+  };
+  take(
+    valuationAsOf(transactions, {
+      asOf: CUTOVER_VALUATION_DATE,
+      priceSeries: opts.priceSeries,
+      fx: opts.fx,
+    }),
+    "prices",
+    true,
+  );
+  if (opts.saved?.asOf === CUTOVER_VALUATION_DATE) {
+    for (const p of opts.saved.portfolios) take(p.valuation, "saved", false);
+  }
+  return { unitValues, splits: inferSplitEvents(transactions) };
 }

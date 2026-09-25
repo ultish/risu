@@ -57,7 +57,7 @@ import { registerGainsRoutes } from "./routes/gains.js";
 import { registerReconcileRoutes } from "./routes/reconcile.js";
 import { registerStakeDrpRoutes } from "./routes/stakeDrp.js";
 import { registerTaxRoutes } from "./routes/tax.js";
-import { registerValuationRoutes } from "./routes/valuations.js";
+import { loadCutoverValues, registerValuationRoutes } from "./routes/valuations.js";
 import {
   acquireTxsBlockedByParcels,
   attachParcelInfo,
@@ -753,6 +753,7 @@ app.post("/api/tax/confirm-sale", async (c) => {
       medicareLevy: profileRow.medicare_levy,
     },
     annualInflationRate: body.inflationRate,
+    cutover: loadCutoverValues(db, txs),
   });
 
   if (estimate.quantitySold <= 0 || estimate.parcels.length === 0) {

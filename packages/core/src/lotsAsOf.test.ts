@@ -28,7 +28,7 @@ const ledger = [
 ];
 const priceSeries = {
   "VAS.AX": [
-    { date: "2027-07-01", close: 105 },
+    { date: "2027-06-30", close: 105 },
     { date: "2028-03-31", close: 130 },
   ],
 };

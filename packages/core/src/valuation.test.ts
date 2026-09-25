@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { combineValuations, valuationAsOf, valuationReportToCsv } from "./valuation.js";
+import {
+  combineValuations,
+  cutoverValuesFrom,
+  valuationAsOf,
+  valuationReportToCsv,
+} from "./valuation.js";
 import type { ParsedTransaction } from "./types.js";
 
 let nextId = 1;
@@ -178,5 +183,27 @@ describe("valuationReportToCsv", () => {
       '2027-06-30,"Me, Myself",commsec,VAS,ASX,AUD,12,2027-06-30,105,,,1260,2026-01-10,10,800,1050,',
       '2027-06-30,"Me, Myself",commsec,VAS,ASX,AUD,12,2027-06-30,105,,,1260,2026-03-10,2,180,210,',
     ]);
+  });
+});
+
+describe("cutoverValuesFrom", () => {
+  const ledger = [tx({ date: "2026-01-10", ticker: "VAS", type: "buy", quantity: 10, price: 80, broker: "commsec" })];
+
+  it("uses the 30 June 2027 close from cached prices", () => {
+    const cv = cutoverValuesFrom(ledger, { priceSeries: vas });
+    expect(cv.unitValues["ASX:VAS"]).toEqual({ unitValueAud: 105, source: "prices" });
+  });
+
+  it("ignores a close from long before, so a sale priced today is estimated instead", () => {
+    const cv = cutoverValuesFrom(ledger, { priceSeries: { "VAS.AX": [{ date: "2026-09-01", close: 90 }] } });
+    expect(cv.unitValues).toEqual({});
+  });
+
+  it("a saved 30 June 2027 valuation wins over prices", () => {
+    const saved = combineValuations("2027-06-30", "2027-07-01T00:00:00Z", [
+      { id: 1, name: "Me", valuation: valuationAsOf(ledger, { asOf: "2027-06-30", priceSeries: { "VAS.AX": [{ date: "2027-06-30", close: 104 }] } }) },
+    ]);
+    const cv = cutoverValuesFrom(ledger, { priceSeries: vas, saved });
+    expect(cv.unitValues["ASX:VAS"]).toEqual({ unitValueAud: 104, source: "saved" });
   });
 });

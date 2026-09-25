@@ -18,6 +18,7 @@ export { parseSharesightPaste } from "./parse/sharesightPaste.js";
 // Phase 3 — tax foundation
 export * from "./tax/types.js";
 export * from "./tax/cgt.js";
+export * from "./tax/act2027.js";
 export * from "./tax/incomeTax.js";
 export * from "./tax/realisedCgt.js";
 export * from "./tax/lotMatching.js";

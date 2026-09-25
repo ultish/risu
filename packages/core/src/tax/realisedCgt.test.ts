@@ -31,7 +31,7 @@ describe("estimateRealisedCgtForLedger", () => {
       }),
       disposal({
         acquiredDate: "2021-01-01",
-        disposedDate: "2027-08-15", // FY2028, post-cutover -> indexation_min30
+        disposedDate: "2027-08-15", // FY2028, post-cutover -> the Act's split
         quantity: 3,
         proceedsAud: 600,
         costBaseAud: 450,
@@ -46,7 +46,9 @@ describe("estimateRealisedCgtForLedger", () => {
     expect(report.lines).toHaveLength(2);
     expect(report.lines[0].appliedRegime).toBe("discount_50");
     expect(report.lines[0].longTerm).toBe(true);
-    expect(report.lines[1].appliedRegime).toBe("indexation_min30");
+    expect(report.lines[1].appliedRegime).toBe("act_2027");
+    // No 30 June 2027 value supplied: estimated by time between cost and proceeds.
+    expect(report.lines[1].act?.cutoverSource).toBe("estimated");
 
     expect(report.fyTotals).toHaveLength(2);
     const fy2025 = report.fyTotals.find((t) => t.financialYear === "FY2025")!;
@@ -282,7 +284,7 @@ describe("estimateRealisedCgtForLedger", () => {
       expect(fy2027.tax).toBeCloseTo(500 * 0.39);
     });
 
-    it("carries a loss forward across a regime change (discount_50 loss offsetting an indexation_min30 gain)", () => {
+    it("carries a loss forward across the cutover (a discount_50 loss offsetting an act_2027 gain)", () => {
       const disposals: RealisedDisposal[] = [
         disposal({ disposedDate: "2025-03-01", proceedsAud: 0, costBaseAud: 1000 }), // FY2025 (pre-cutover): -1000
         disposal({
@@ -305,7 +307,7 @@ describe("estimateRealisedCgtForLedger", () => {
       expect(fy2025.lossCarriedOut).toBeCloseTo(1000);
 
       const fy2028 = report.fyTotals.find((t) => t.financialYear === "FY2028")!;
-      expect(fy2028.appliedRegime).toBe("indexation_min30");
+      expect(fy2028.appliedRegime).toBe("act_2027");
       expect(fy2028.priorLossApplied).toBeCloseTo(1000);
       expect(fy2028.taxableGain).toBe(0);
       expect(fy2028.tax).toBe(0);

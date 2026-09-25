@@ -57,20 +57,17 @@ describe("taxableGainPerUnit", () => {
     ).toBeCloseTo(100);
   });
 
-  it("indexes cost post-2027 so older lots can have a smaller gain", () => {
-    const infl = 0.1;
-    const oldScore = taxableGainPerUnit(lot, 200, "2027-07-01", {
-      regime: "auto_by_date",
-      annualInflationRate: infl,
-    });
+  it("after the cutover, splits each lot at its 30 June 2027 value", () => {
+    const opts = {
+      regime: "auto_by_date" as const,
+      annualInflationRate: 0,
+      cutover: { unitValues: { "ASX:VAS": { unitValueAud: 190, source: "prices" as const } }, splits: [] },
+    };
     const newer = { ...lot, acquiredDate: "2026-07-01", costBaseAud: 1800 };
-    const newScore = taxableGainPerUnit(newer, 200, "2027-07-01", {
-      regime: "auto_by_date",
-      annualInflationRate: infl,
-    });
-    // Old lot: $100 indexed ~7.5y at 10% ≈ $204 → slight loss at $200 proceeds
-    // New lot: $180 indexed 1y at 10% ≈ $198 → small gain
-    expect(oldScore).toBeLessThan(newScore);
+    // Old lot: $90/unit before (halved → 45) + $10 after = 55.
+    expect(taxableGainPerUnit(lot, 200, "2028-07-01", opts)).toBeCloseTo(55);
+    // Newer lot: $10 before (halved → 5) + $10 after = 15.
+    expect(taxableGainPerUnit(newer, 200, "2028-07-01", opts)).toBeCloseTo(15);
   });
 });
 
@@ -222,25 +219,25 @@ describe("estimateHypotheticalSale", () => {
     expect(r.capitalGain).toBeLessThan(0);
   });
 
-  it("post-2027 min_cgt can pick a newer lot when indexation shrinks the older lot's gain less than the newer lot's higher cost", () => {
-    // Cheap old lot vs expensive recent lot, sold after the cutover.
-    // At 0% inflation the old lot has a much larger gain, so min_cgt
-    // still prefers the new lot — same as pre-2027, just without discount.
+  it("post-2027 sale splits at the 30 June 2027 value and min_cgt picks the smaller taxable gain", () => {
     const r = estimateHypotheticalSale({
       openLots,
       quantity: 5,
       proceedsPerUnitAud: 200,
-      disposedDate: "2027-07-01",
+      disposedDate: "2028-07-01",
       matching: "min_cgt",
       regime: "auto_by_date",
       profile,
       annualInflationRate: 0,
+      cutover: { unitValues: { "ASX:VAS": { unitValueAud: 190, source: "saved" } }, splits: [] },
     });
-    expect(r.appliedRegime).toBe("indexation_min30");
+    expect(r.appliedRegime).toBe("act_2027");
     expect(r.parcels[0].acquiredDate).toBe("2021-01-01");
-    // gain 5*(200-180)=100, no discount, rate 39% → 39
-    expect(r.tax).toBeCloseTo(39);
-    expect(r.comparison.fifo.tax).toBeGreaterThan(r.tax);
+    expect(r.parcels[0].act).toMatchObject({ preGain: 50, postGain: 50, cutoverSource: "saved" });
+    // 2021 lot: $50 before (halved → 25) + $50 after, all at 39%.
+    expect(r.tax).toBeCloseTo((25 + 50) * 0.39);
+    // 2020 lot: $450 before (halved → 225) + $50 after.
+    expect(r.comparison.fifo.tax).toBeCloseTo((225 + 50) * 0.39);
   });
 
   it("reports unmatched quantity when asking to sell more than is held", () => {

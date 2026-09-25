@@ -1,7 +1,10 @@
 import {
+  CUTOVER_VALUATION_DATE,
   combineValuations,
+  cutoverValuesFrom,
   valuationAsOf,
   valuationReportToCsv,
+  type CutoverValues,
   type ParsedTransaction,
   type RecordedParcelTake,
   type ValuationReport,
@@ -21,6 +24,32 @@ type SnapshotRow = {
   report_json: string;
   created_at: string;
 };
+
+/**
+ * 30 June 2027 values for splitting disposals under the Act: cached prices,
+ * overridden by any valuations saved for that date (newest last, so it wins
+ * where they overlap). Read-only.
+ */
+export function loadCutoverValues(
+  db: Database.Database,
+  transactions: ParsedTransaction[],
+): CutoverValues {
+  const rows = db
+    .prepare("SELECT report_json FROM valuation_snapshots WHERE as_of = ? ORDER BY id")
+    .all(CUTOVER_VALUATION_DATE) as Array<{ report_json: string }>;
+  const saved = rows.length
+    ? combineValuations(
+        CUTOVER_VALUATION_DATE,
+        "",
+        rows.flatMap((r) => (JSON.parse(r.report_json) as ValuationReport).portfolios),
+      )
+    : null;
+  return cutoverValuesFrom(transactions, {
+    priceSeries: loadPriceSeries(db),
+    fx: { rates: loadFxRates(db), series: loadFxHistory(db) },
+    saved,
+  });
+}
 
 function todayIso(): string {
   return new Date().toISOString().slice(0, 10);

@@ -11,6 +11,7 @@ import {
 } from "@risu/core";
 import type { Context } from "hono";
 import type Database from "better-sqlite3";
+import { loadCutoverValues } from "./valuations.js";
 
 type TaxProfileRow = {
   id: number;
@@ -114,6 +115,7 @@ export function registerTaxRoutes(
       cgtInflationRate: inflationRateParam ? Number(inflationRateParam) : undefined,
       asxFrankingPercent: asxFrankingParam ? Number(asxFrankingParam) : undefined,
       usWithholdingRate: usWithholdingParam ? Number(usWithholdingParam) : undefined,
+      cgtCutover: loadCutoverValues(db, txs),
     });
 
     return c.json({
@@ -221,6 +223,7 @@ export function registerTaxRoutes(
       regime: regimeParam,
       profile,
       annualInflationRate: inflationRate,
+      cutover: loadCutoverValues(deps.getDb(), txs),
     });
 
     return c.json({

@@ -22,11 +22,9 @@ const profileZero: TaxProfile = {
 };
 
 describe("resolveCgtRegime", () => {
-  it("auto_by_date switches at 2027-07-01", () => {
+  it("auto_by_date switches to the Act's rules at 2027-07-01", () => {
     expect(resolveCgtRegime("auto_by_date", "2027-06-30")).toBe("discount_50");
-    expect(resolveCgtRegime("auto_by_date", "2027-07-01")).toBe(
-      "indexation_min30",
-    );
+    expect(resolveCgtRegime("auto_by_date", "2027-07-01")).toBe("act_2027");
   });
 });
 

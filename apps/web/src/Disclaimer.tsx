@@ -12,7 +12,7 @@
  */
 
 const DEFAULT_TEXT =
-  "Estimates only — not financial, tax, or investment advice. CGT uses per-parcel cost base and simplified pre/post 1 Jul 2027 regimes. Not ATO software. You remain responsible for your own tax and investment decisions.";
+  "Estimates only — not financial, tax, or investment advice. CGT uses per-parcel cost base and the 1 Jul 2027 split (Tax Reform No. 1 Act 2026), simplified. Not ATO software. You remain responsible for your own tax and investment decisions.";
 
 export type DisclaimerProps = {
   /** Shorter one-line style */

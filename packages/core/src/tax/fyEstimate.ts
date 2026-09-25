@@ -11,6 +11,7 @@ import { summarizeDividendIncome, type AssessableDividendEvent } from "../income
 import { computeLots, type RecordedParcelTake } from "../lots.js";
 import type { ParsedTransaction } from "../types.js";
 import { estimateFyDividendTax, type FyTaxEstimateSummary } from "./incomeTax.js";
+import type { CutoverValues } from "./act2027.js";
 import { orderFnForMatching } from "./lotMatching.js";
 import { estimateRealisedCgtForLedger, type RealisedCgtReport } from "./realisedCgt.js";
 import type { CgtRegime, LotMatchingMethod, TaxProfile } from "./types.js";
@@ -31,6 +32,8 @@ export type FyTaxEstimateInput = {
   platformFifoBrokers?: string[];
   /** CPI indexation p.a. for post-2027 CGT (decimal); default in cgt.ts */
   cgtInflationRate?: number;
+  /** 30 June 2027 values, for disposals the Act splits. Estimated when absent. */
+  cgtCutover?: CutoverValues;
   /** Assumed franking % 0–100 for ASX dividend lines only (default 70). */
   asxFrankingPercent?: number;
   /** Foreign dividend withholding rate as decimal 0–1 (default 0.15). */
@@ -80,6 +83,7 @@ export function estimateFyTax(
     orderLotsForSale: orderFnForMatching(lotMatching, {
       regime: opts.cgtRegime,
       annualInflationRate: opts.cgtInflationRate,
+      cutover: opts.cgtCutover,
     }),
     customMatching: lotMatching === "min_cgt" ? "min_cgt" : undefined,
     recordedTakes: opts.recordedTakes,
@@ -89,6 +93,7 @@ export function estimateFyTax(
     regime: opts.cgtRegime,
     profile: opts.profile,
     annualInflationRate: opts.cgtInflationRate,
+    cutover: opts.cgtCutover,
   });
 
   const fySet = new Set<string>();

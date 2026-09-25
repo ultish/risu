@@ -24,6 +24,8 @@ import {
   previewImportFile,
   reconcileFile,
   refreshPrices,
+  type Act2027PartsDto,
+  type AppliedCgtRegime,
 } from "./api";
 import AllocationChart from "./AllocationChart";
 import { Disclaimer } from "./Disclaimer";
@@ -256,11 +258,28 @@ export function qty(n: number) {
  * *ruleset* — the 50% discount only actually applies when held ≥ 365 days.
  */
 export function cgtLineRegimeLabel(
-  applied: "discount_50" | "indexation_min30",
+  applied: AppliedCgtRegime,
   longTerm: boolean,
+  act?: Act2027PartsDto,
 ): string {
+  if (applied === "act_2027") {
+    return act?.cutoverValueAud == null ? "Indexed (bought after 1 Jul 2027)" : "Split at 30 Jun 2027";
+  }
   if (applied === "indexation_min30") return "Indexed";
   return longTerm ? "50% disc." : "No disc. (short)";
+}
+
+const CUTOVER_SOURCE: Record<string, string> = {
+  saved: "saved valuation",
+  prices: "cached prices",
+  estimated: "estimated — no 30 Jun 2027 price yet",
+};
+
+/** One line on how a post-2027 disposal was split, for under the regime label. */
+export function cgtActDetail(act: Act2027PartsDto | undefined): string | null {
+  if (!act || act.cutoverValueAud == null) return null;
+  const before = `before ${money(act.preGain)}${act.preGain > 0 && act.heldTwelveMonths ? " (50% disc.)" : ""}`;
+  return `${before} · after ${money(act.postGain)} · 30 Jun value ${money(act.cutoverValueAud)} (${CUTOVER_SOURCE[act.cutoverSource ?? "estimated"]})`;
 }
 
 /** Unrealised return % (native currency — cost and value in the same currency, FX-neutral). */

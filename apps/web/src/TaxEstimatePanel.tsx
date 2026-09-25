@@ -16,7 +16,7 @@ import {
   fetchTaxProfiles,
 } from "./api";
 import { Disclaimer } from "./Disclaimer";
-import { Empty, Panel, cgtLineRegimeLabel, money } from "./App";
+import { Empty, Panel, cgtActDetail, cgtLineRegimeLabel, money } from "./App";
 
 /** Current AU financial year label (browser local date) — e.g. "FY2027" for any date in 1 Jul 2026–30 Jun 2027. */
 function currentAuFinancialYear(): string {
@@ -40,9 +40,9 @@ const MATCHING: Array<{ id: LotMatchingMethod; label: string; hint: string }> = 
 ];
 
 const REGIMES: Array<{ id: CgtRegime; label: string }> = [
-  { id: "auto_by_date", label: "Auto (pre/post 1 Jul 2027 by disposal date)" },
+  { id: "auto_by_date", label: "Auto — as legislated (sales from 1 Jul 2027 split at 30 Jun 2027)" },
   { id: "discount_50", label: "50% discount (legacy, all disposals) — reference" },
-  { id: "indexation_min30", label: "Indexed, no discount (post-2027, all disposals) — reference" },
+  { id: "indexation_min30", label: "Indexed from purchase, no discount (all disposals) — reference" },
 ];
 
 export function TaxEstimatePanel({
@@ -105,7 +105,12 @@ export function TaxEstimatePanel({
           Roughly how much tax to set aside for a financial year: dividend
           income tax plus realised capital gains tax on your actual sells.
           Each sold parcel keeps its own acquisition date, so the 1 Jul 2027
-          CGT rule change applies per-disposal.{" "}
+          CGT rule change applies per-disposal: a parcel held across it is
+          split at its 30 June 2027 value — the gain before keeps the 50%
+          discount if held 12 months by the sale, the gain after is indexed
+          from 1 July 2027 with a 30% minimum. Losses go against the pre-2027
+          gains first, as the Act requires. The 30 June 2027 value comes
+          from a saved valuation (Valuations tab) if you have one.{" "}
           <strong className="text-gray-300">Auto (FIFO)</strong> sells oldest
           parcels first;{" "}
           <strong className="text-gray-300">Auto (minimize CGT)</strong>{" "}
@@ -397,6 +402,13 @@ export function TaxEstimatePanel({
                             misleading, since a loss on one parcel offsets a
                             gain on another sold the same year.
                           </p>
+                          {(fyCgt?.minimumTaxGain ?? 0) > 0 && (
+                            <p className="mb-2 text-xs text-gray-500">
+                              {money(fyCgt?.minimumTaxGain)} of this year&apos;s
+                              gains accrued after 1 Jul 2027 and is taxed at no
+                              less than 30%.
+                            </p>
+                          )}
                           <table className="w-full text-xs">
                             <thead>
                               <tr className="text-left text-gray-500">
@@ -454,7 +466,12 @@ export function TaxEstimatePanel({
                                         : "FIFO"}
                                   </td>
                                   <td className="py-1 pr-3 text-gray-400">
-                                    {cgtLineRegimeLabel(l.appliedRegime, l.longTerm)}
+                                    {cgtLineRegimeLabel(l.appliedRegime, l.longTerm, l.act)}
+                                    {cgtActDetail(l.act) && (
+                                      <span className="block text-[11px] text-gray-500">
+                                        {cgtActDetail(l.act)}
+                                      </span>
+                                    )}
                                   </td>
                                 </tr>
                               ))}
