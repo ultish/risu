@@ -57,6 +57,7 @@ import { registerGainsRoutes } from "./routes/gains.js";
 import { registerReconcileRoutes } from "./routes/reconcile.js";
 import { registerStakeDrpRoutes } from "./routes/stakeDrp.js";
 import { registerTaxRoutes } from "./routes/tax.js";
+import { registerValuationRoutes } from "./routes/valuations.js";
 import {
   acquireTxsBlockedByParcels,
   attachParcelInfo,
@@ -410,6 +411,12 @@ function loadPlatformFifoBrokers(): string[] {
   return parsePlatformFifoBrokers(loadAppSettings().platform_fifo_brokers);
 }
 
+registerValuationRoutes(app, {
+  getDb,
+  loadTransactions,
+  loadParcelTakes: () => loadParcelTakes(db),
+  loadPlatformFifoBrokers,
+});
 registerTaxRoutes(app, {
   getDb,
   loadTransactions,

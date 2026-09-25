@@ -224,6 +224,22 @@ function migrate(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_parcel_acquire ON parcel_disposals(acquire_transaction_id);
   `);
 
+  // Saved valuations ("what was everything worth on this date") — the
+  // report is computed when saved and stored whole, so later price
+  // refreshes or ledger edits never change a saved record.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS valuation_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      as_of TEXT NOT NULL,
+      label TEXT NOT NULL,
+      notes TEXT,
+      portfolio_id INTEGER,
+      report_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_valuation_as_of ON valuation_snapshots(as_of);
+  `);
+
   try {
     db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_tx_portfolio_external

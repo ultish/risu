@@ -38,6 +38,7 @@ import { SettingsPanel } from "./SettingsPanel";
 import { TaxEstimatePanel } from "./TaxEstimatePanel";
 import { TaxSettingsPanel } from "./TaxSettingsPanel";
 import { TickerPanel } from "./TickerPanel";
+import { ValuationsPanel } from "./ValuationsPanel";
 
 /** Top-level nav — synced to `?tab=` for copyable links */
 const MAIN_TABS = [
@@ -47,6 +48,7 @@ const MAIN_TABS = [
   "import",
   "planner",
   "tax",
+  "valuations",
   "settings",
 ] as const;
 type MainTab = (typeof MAIN_TABS)[number];
@@ -1097,6 +1099,7 @@ export default function App() {
             ["import", "Import"],
             ["planner", "Planner"],
             ["tax", "Tax"],
+            ["valuations", "Valuations"],
             ["settings", "Settings"],
           ] as const
         ).map(([id, label]) => (
@@ -2156,6 +2159,8 @@ export default function App() {
           />
         </div>
       )}
+
+      {tab === "valuations" && <ValuationsPanel portfolios={portfolios} />}
 
       {tab === "settings" && (
         <div className="space-y-4">

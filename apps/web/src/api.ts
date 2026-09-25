@@ -1100,3 +1100,128 @@ export async function backfillFxRates() {
     unresolved: number;
   }>(await fetch(`${BASE}/api/settings/backfill-fx`, { method: "POST" }));
 }
+
+// ── Valuations (holdings stamped at a past date) ────────────────────────────
+
+export type ValuationFlag =
+  | "no_price"
+  | "stale_price"
+  | "no_fx"
+  | "fx_not_historical"
+  | "untracked_units";
+
+export type ValuationLineDto = {
+  ticker: string;
+  exchange: string;
+  currency: string;
+  quantity: number;
+  costBaseAud: number;
+  unitValue: number | null;
+  priceDate: string | null;
+  priceSymbol: string | null;
+  fxRate: number | null;
+  fxDate: string | null;
+  marketValueAud: number | null;
+  parcels: Array<{
+    acquiredDate: string;
+    quantity: number;
+    costBaseAud: number;
+    marketValueAud: number | null;
+  }>;
+  untrackedQuantity: number;
+  flags: ValuationFlag[];
+};
+
+export type ValuationBrokerDto = {
+  broker: string;
+  lines: ValuationLineDto[];
+  costBaseAud: number;
+  marketValueAud: number;
+  unvalued: number;
+};
+
+export type ValuationReportDto = {
+  asOf: string;
+  generatedAt: string;
+  portfolios: Array<{
+    id: number;
+    name: string;
+    valuation: {
+      asOf: string;
+      brokers: ValuationBrokerDto[];
+      costBaseAud: number;
+      marketValueAud: number;
+      unvalued: number;
+    };
+  }>;
+  costBaseAud: number;
+  marketValueAud: number;
+  unvalued: number;
+};
+
+export type SavedValuation = {
+  id: number;
+  asOf: string;
+  label: string;
+  notes: string | null;
+  portfolioId: number | null;
+  createdAt: string;
+  marketValueAud: number;
+  costBaseAud: number;
+  unvalued: number;
+};
+
+/** Errors from these routes are `{ error }` JSON; surface just the message. */
+async function valuationJson<T>(res: Response): Promise<T> {
+  if (!res.ok) {
+    const text = await res.text();
+    let message = text || res.statusText;
+    try {
+      message = (JSON.parse(text) as { error?: string }).error ?? message;
+    } catch {
+      /* not JSON */
+    }
+    throw new Error(message);
+  }
+  return res.json() as Promise<T>;
+}
+
+export async function previewValuation(asOf: string, portfolioId: number | "all") {
+  const q = new URLSearchParams({ asOf, portfolioId: String(portfolioId) });
+  return valuationJson<ValuationReportDto>(await fetch(`${BASE}/api/valuations/preview?${q}`));
+}
+
+export async function saveValuation(body: {
+  asOf: string;
+  portfolioId: number | "all";
+  label: string;
+  notes: string;
+}) {
+  return valuationJson<SavedValuation & { report: ValuationReportDto }>(
+    await fetch(`${BASE}/api/valuations`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }),
+  );
+}
+
+export async function fetchSavedValuations() {
+  return valuationJson<SavedValuation[]>(await fetch(`${BASE}/api/valuations`));
+}
+
+export async function fetchSavedValuation(id: number) {
+  return valuationJson<SavedValuation & { report: ValuationReportDto }>(
+    await fetch(`${BASE}/api/valuations/${id}`),
+  );
+}
+
+export async function deleteSavedValuation(id: number) {
+  return valuationJson<{ ok: true }>(
+    await fetch(`${BASE}/api/valuations/${id}`, { method: "DELETE" }),
+  );
+}
+
+export function savedValuationCsvUrl(id: number) {
+  return `${BASE}/api/valuations/${id}/csv`;
+}

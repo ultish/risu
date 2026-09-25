@@ -152,6 +152,64 @@ export function pricesAsOf(
   return prices;
 }
 
+/**
+ * The close actually used for an instrument on `date` — the last bar on or
+ * before it, with that bar's own date — trying the same keys, in the same
+ * order, as `pricesAsOf`. Null when nothing is cached on or before `date`.
+ */
+export function priceBarAsOf(
+  ticker: string,
+  exchange: string,
+  date: string,
+  priceIndex: Map<string, Array<{ date: string; close: number }>>,
+): { date: string; close: number; symbol: string } | null {
+  const ex = (exchange || "ASX").toUpperCase();
+  const t = ticker.toUpperCase();
+  const keys = [toYahooSymbol(t, ex), holdingPriceKey(ex, t), t];
+  if (ex === "ASX") keys.push(`${t}.AX`);
+  for (const symbol of keys) {
+    const bar = lastBarOnOrBefore(priceIndex.get(symbol), date);
+    if (bar) return { date: bar.date, close: bar.close, symbol };
+  }
+  return null;
+}
+
+/** The FX rate from a dated series on or before `date`, with that rate's date. */
+export function fxBarAsOf(
+  pair: string,
+  date: string,
+  seriesIndex: Map<string, Array<{ date: string; rate: number }>>,
+): { date: string; rate: number } | null {
+  const series = seriesIndex.get(pair);
+  if (!series?.length) return null;
+  let best: { date: string; rate: number } | null = null;
+  for (const row of series) {
+    if (row.date > date) break;
+    best = row;
+  }
+  return best;
+}
+
+function lastBarOnOrBefore(
+  series: Array<{ date: string; close: number }> | undefined,
+  date: string,
+): { date: string; close: number } | null {
+  if (!series?.length) return null;
+  let lo = 0;
+  let hi = series.length - 1;
+  let best: { date: string; close: number } | null = null;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (series[mid]!.date <= date) {
+      best = series[mid]!;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
 export function fxAsOf(
   date: string,
   flat: Record<string, number | null | undefined>,
